@@ -84,8 +84,10 @@ func (e *watchEnv) quiet() {
 	}
 }
 
+// put replaces the file atomically, so that a poll never sees it half
+// written.
 func (e *watchEnv) put(s string) {
-	if err := os.WriteFile(e.path, []byte(s), 0o644); err != nil {
+	if err := cfgfile.WriteFile(e.path, []byte(s), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
 }

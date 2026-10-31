@@ -7,7 +7,8 @@
   (`FuzzParse`, `FuzzPatch`, `FuzzFormat` in `jwcc`) must survive a short run. Give every
   test run a `-timeout` and every fuzz run a `-fuzztime`; add
   `-fuzzminimizetime 0` on loaded hosts (minimising looks like a stall).
-- Standard library only, also for tests; `deps_test.go` checks it.
+- Standard library only, also for tests, besides `github.com/djylb/timeshim`
+  (the injectable clock of `WatchOptions.Clock`); `deps_test.go` checks it.
 - `jwcc` stays usable on its own and must not import the root package.
 - Format must stay idempotent and keep the decoded value.
 - Parse then Pack must return the input byte for byte; Standardize must keep

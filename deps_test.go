@@ -8,7 +8,7 @@ import (
 )
 
 // TestStandardLibraryOnly checks that every package, tests included,
-// depends on the standard library and this module alone.
+// depends on the standard library, this module and timeshim alone.
 func TestStandardLibraryOnly(t *testing.T) {
 	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
 		t.Skip("cannot run the go command")
@@ -18,13 +18,14 @@ func TestStandardLibraryOnly(t *testing.T) {
 		t.Skip("no go command")
 	}
 	const module = "github.com/djylb/cfgfile"
+	const timeshim = "github.com/djylb/timeshim" // the injectable clock, standard library only
 	out, err := exec.Command(goCmd, "list", "-deps", "-test", "-f", "{{.ImportPath}} {{.Standard}}", module+"/...").Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
 	for line := range strings.Lines(string(out)) {
 		path, std, _ := strings.Cut(strings.TrimSpace(line), " ")
-		if std != "true" && path != module && !strings.HasPrefix(path, module+"/") && !strings.HasPrefix(path, module+".") && !strings.HasPrefix(path, module+"_") {
+		if std != "true" && path != module && path != timeshim && !strings.HasPrefix(path, module+"/") && !strings.HasPrefix(path, module+".") && !strings.HasPrefix(path, module+"_") {
 			t.Errorf("dependency outside the standard library: %s", path)
 		}
 	}

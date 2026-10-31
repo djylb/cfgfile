@@ -2,7 +2,9 @@
 
 Versioned configuration files for Go, written in JWCC (JSON with comments
 and trailing commas), that programs can rewrite without losing the
-user's comments. Standard library only.
+user's comments. Standard library only, besides
+[timeshim](https://github.com/djylb/timeshim) for the watcher's injectable
+clock.
 
 - `cfgfile`: `Open[T]` reads a file into a struct (strict decoding,
   versions and migrations, environment and flag overrides, validation) and
@@ -266,7 +268,10 @@ leads to a content hash, and only new content is loaded, after `Debounce`
 (default 200ms) of quiet. A reload runs the whole read pipeline; invalid
 files and removal (`ErrRemoved`) go to `OnError` and keep the previous
 value; a different valid value becomes `File.Value` and goes to `OnChange`
-with the old and new values and the top-level members that changed. Which
+with the old and new values and the top-level members that changed.
+`Clock` (a `timeshim.Clock`, default `timeshim.Real`) schedules the polls,
+so tests can drive them with a `timeshim.Fake`; the recent-modification
+check always compares file times with real time. Which
 members can be applied without a restart is the caller's decision. The
 `File`'s own `Save` and `Update` do not cause callbacks. `Watcher.Reload`
 forces a reload, for example on SIGHUP.

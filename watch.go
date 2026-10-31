@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/djylb/cfgfile/jwcc"
+	"github.com/djylb/timeshim"
 )
 
 // WatchOptions configures File.Watch.
@@ -26,6 +27,11 @@ type WatchOptions[T any] struct {
 	// OnError receives failed reloads (with file positions where known)
 	// and ErrRemoved. The previous value stays in effect.
 	OnError func(error)
+	// Clock schedules the polling; nil uses timeshim.Real. Tests can supply
+	// a timeshim.Fake to run the watcher deterministically. The check for a
+	// recently modified file compares file times with real time whatever
+	// the clock, since file times come from the real file system.
+	Clock timeshim.Clock
 }
 
 // Change describes a reload that changed the value in effect.
@@ -76,6 +82,9 @@ func (f *File[T]) Watch(ctx context.Context, wo WatchOptions[T]) (*Watcher, erro
 	}
 	if wo.Debounce <= 0 {
 		wo.Debounce = 200 * time.Millisecond
+	}
+	if wo.Clock == nil {
+		wo.Clock = timeshim.Real
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	w := &Watcher{reload: make(chan struct{}, 1), cancel: cancel, done: make(chan struct{})}
@@ -131,9 +140,10 @@ func (p *poller[T]) run(ctx context.Context) {
 		p.f.watching = false
 		p.f.mu.Unlock()
 	}()
-	tick := time.NewTicker(p.wo.Interval)
+	// The ticker polls at a fixed rate; all work happens on this goroutine.
+	tick := timeshim.NewTicker(p.wo.Clock, p.wo.Interval)
 	defer tick.Stop()
-	debounce := time.NewTimer(time.Hour)
+	debounce := timeshim.NewTimer(p.wo.Clock, time.Hour)
 	debounce.Stop()
 	defer debounce.Stop()
 	pending, rounds := false, 0
@@ -143,7 +153,7 @@ func (p *poller[T]) run(ctx context.Context) {
 			return
 		case <-p.w.reload:
 			pending = false
-			debounce.Stop()
+			debounce.Stop() // also drops a fired, unreceived debounce
 			p.check(true)
 		case <-tick.C:
 			if moved, recent := p.changed(); !pending && (moved || recent) {
@@ -176,7 +186,7 @@ func (p *poller[T]) changed() (moved, recent bool) {
 	prev := p.stat
 	p.stat = st
 	moved = prev == nil || !os.SameFile(prev, st) || prev.Size() != st.Size() || !prev.ModTime().Equal(st.ModTime())
-	return moved, time.Since(st.ModTime()) < 2*time.Second+p.wo.Interval
+	return moved, time.Since(st.ModTime()) < 2*time.Second+p.wo.Interval // file times are real
 }
 
 func (p *poller[T]) check(force bool) {
