@@ -35,7 +35,11 @@ func (c *ExampleConfig) Validate() error {
 // Open a file, change a value and save it: comments and layout stay.
 func ExampleOpen() {
 	dir, _ := os.MkdirTemp("", "example")
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Println(err)
+		}
+	}()
 	path := filepath.Join(dir, "app.jsonc")
 	_ = os.WriteFile(path, []byte(`{
   "version": 1,
@@ -94,7 +98,11 @@ func ExampleDefineFlags() {
 // A migration renames a member of version 1 on the syntax tree.
 func ExampleMigration() {
 	dir, _ := os.MkdirTemp("", "example")
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Println(err)
+		}
+	}()
 	path := filepath.Join(dir, "app.jsonc")
 	_ = os.WriteFile(path, []byte(`{"version": 1, "addr": ":80"}`), 0o600)
 
@@ -118,7 +126,11 @@ func ExampleMigration() {
 // Watch delivers valid changes; invalid edits keep the previous value.
 func ExampleFile_Watch() {
 	dir, _ := os.MkdirTemp("", "example")
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Println(err)
+		}
+	}()
 	path := filepath.Join(dir, "app.jsonc")
 	_ = os.WriteFile(path, []byte(`{"listen": ":80"}`), 0o600)
 

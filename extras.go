@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/djylb/cfgfile/jwcc"
@@ -132,7 +133,8 @@ func Template[T any](o *Options) ([]byte, error) {
 	b.WriteString("{\n")
 	if o.versioned() {
 		name, _ := marshal(o.field())
-		fmt.Fprintf(&b, "%s: %d,\n", bytes.TrimSpace(name), o.Version)
+		b.Write(bytes.TrimSpace(name))
+		b.WriteString(": " + strconv.Itoa(o.Version) + ",\n")
 	}
 	if err := template(&b, rv, o, true, false, 0); err != nil {
 		return nil, err

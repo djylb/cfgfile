@@ -400,10 +400,10 @@ func decode(path string, text []byte, dst any, o *Options, warnings *[]error) er
 type checker struct {
 	std          []byte
 	versionField string
-	versioned    bool
 	at           func(int, jwcc.Path, error) error
 	unknown      Unknown
 	warnings     *[]error
+	versioned    bool
 	secret       bool // inside a secret member: keep values out of errors
 }
 
@@ -457,13 +457,17 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 					continue
 				}
 				err := at(m.Name.Start, cp, ErrUnknown)
-				if c.unknown == UnknownWarn {
+				switch c.unknown {
+				case UnknownReject:
+					return err
+				case UnknownWarn:
 					if c.warnings != nil {
 						*c.warnings = append(*c.warnings, err)
 					}
-					continue
+				default:
+					return err
 				}
-				return err
+				continue
 			}
 			inner := *c
 			inner.secret = c.secret || fm.secret

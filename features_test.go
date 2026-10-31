@@ -74,8 +74,11 @@ func TestUnknownWarn(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err := cfgfile.Load[App](p, &cfgfile.Options{Unknown: cfgfile.UnknownWarn})
-	if err != nil || len(r.Warnings) != 1 || !errors.Is(r.Warnings[0], cfgfile.ErrUnknown) || !strings.Contains(r.Warnings[0].Error(), ":2:2: extra") {
-		t.Fatal(err, r.Warnings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Warnings) != 1 || !errors.Is(r.Warnings[0], cfgfile.ErrUnknown) || !strings.Contains(r.Warnings[0].Error(), ":2:2: extra") {
+		t.Fatal(r.Warnings)
 	}
 }
 
@@ -98,8 +101,11 @@ func TestFilePath(t *testing.T) {
 	}
 	// Overrides stay relative to the working directory.
 	r, err := cfgfile.Load[App](p, &cfgfile.Options{EnvPrefix: "A_", LookupEnv: envOf(map[string]string{"A_DATA_DIR": "x"})})
-	if err != nil || r.Value.DataDir != "x" {
-		t.Fatal(err, r.Value.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Value.DataDir != "x" {
+		t.Fatal(r.Value.DataDir)
 	}
 }
 
@@ -135,17 +141,17 @@ func TestSecretsAndTags(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "topsecretvalue") {
 		t.Fatal(err)
 	}
-	fs := flag.NewFlagSet("x", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	must(t, cfgfile.DefineFlags[App](fs, nil))
-	if fs.Lookup("internal") != nil || fs.Lookup("password").DefValue != "" || fs.Lookup("db.port").DefValue != "5432" || fs.Lookup("db.host").Usage != "database host" {
+	flags := flag.NewFlagSet("x", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	must(t, cfgfile.DefineFlags[App](flags, nil))
+	if flags.Lookup("internal") != nil || flags.Lookup("password").DefValue != "" || flags.Lookup("db.port").DefValue != "5432" || flags.Lookup("db.host").Usage != "database host" {
 		t.Fatal("flag definitions")
 	}
-	if _, err := cfgfile.Load[App]("", &cfgfile.Options{Flags: fs}); err == nil {
+	if _, err := cfgfile.Load[App]("", &cfgfile.Options{Flags: flags}); err == nil {
 		t.Fatal("unparsed flags accepted")
 	}
-	must(t, fs.Parse([]string{"-db.port=1", "-name", "n"}))
-	r, err = cfgfile.Load[App]("", &cfgfile.Options{Flags: fs})
+	must(t, flags.Parse([]string{"-db.port=1", "-name", "n"}))
+	r, err = cfgfile.Load[App]("", &cfgfile.Options{Flags: flags})
 	if err != nil || r.Value.DB.Port != 1 || r.Value.Name != "n" || len(r.Overrides) != 2 {
 		t.Fatal(err, r)
 	}
@@ -245,12 +251,12 @@ func TestFinalReviewFixes(t *testing.T) {
 		t.Fatalf("%v %s", err, b)
 	}
 	// L3: a bad secret flag value is not echoed by the flag package.
-	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	flags := flag.NewFlagSet("x", flag.ContinueOnError)
 	var out strings.Builder
-	fs.SetOutput(&out)
-	must(t, cfgfile.DefineFlags[sec](fs, nil))
-	must(t, fs.Parse([]string{"-pin=topsecret"}))
-	_, err = cfgfile.Load[sec]("", &cfgfile.Options{Flags: fs})
+	flags.SetOutput(&out)
+	must(t, cfgfile.DefineFlags[sec](flags, nil))
+	must(t, flags.Parse([]string{"-pin=topsecret"}))
+	_, err = cfgfile.Load[sec]("", &cfgfile.Options{Flags: flags})
 	if err == nil || strings.Contains(err.Error()+out.String(), "topsecret") {
 		t.Fatal(err, out.String())
 	}
