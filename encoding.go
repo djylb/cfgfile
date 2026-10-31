@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -135,7 +134,7 @@ func readFile(path string, o *Options) (_ []byte, err error) {
 		limit = int64(o.Limits.MaxSize)
 	}
 	limit = 2*limit + 2 // UTF-16 with its byte order mark
-	f, err := os.Open(path)
+	f, err := openShared(path)
 	if err != nil {
 		return nil, err
 	}

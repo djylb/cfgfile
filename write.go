@@ -93,7 +93,7 @@ func WriteFile(path string, data []byte, perm fs.FileMode) (err error) {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(f.Name(), path); err != nil {
+	if err = replaceFile(f.Name(), path); err != nil {
 		return err
 	}
 	if serr := syncDir(dir); serr != nil {
