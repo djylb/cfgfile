@@ -1,0 +1,5 @@
+go test fuzz v1
+[]byte("{}")
+string("\xf7")
+string("\xbe")
+byte('\x03')
