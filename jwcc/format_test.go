@@ -52,7 +52,7 @@ func checkFormat(t *testing.T, data []byte) {
 	want := decodeAny(t, v.Standardize())
 	for _, o := range []*FormatOptions{nil, {Trailing: TrailingKeep}, {Trailing: TrailingRemove, Indent: "\t", Newline: "\r"}} {
 		once := Format(v, o)
-		w, err := Parse(once, &Options{MaxDepth: 1 << 20, MaxSize: 1 << 30})
+		w, err := Parse(once, &Limits{MaxDepth: 1 << 20, MaxSize: 1 << 30})
 		if err != nil {
 			t.Fatalf("Format produced invalid JWCC: %v\n%q\nfrom %q", err, once, data)
 		}

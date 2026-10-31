@@ -28,8 +28,8 @@ func TestCLI(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.jsonc")
 	q := filepath.Join(dir, "b.jsonc")
-	os.WriteFile(p, []byte(messy), 0o644)
-	os.WriteFile(q, []byte(tidy), 0o644)
+	mustWrite(t, p, []byte(messy), 0o644)
+	mustWrite(t, q, []byte(tidy), 0o644)
 	if code, out, _ := cli(t, "", "-check", p, q); code != 1 || out != p+"\n" {
 		t.Fatalf("%d %q", code, out)
 	}
@@ -53,5 +53,12 @@ func TestCLI(t *testing.T) {
 	}
 	if code, _, _ := cli(t, "", "-trailing", "x"); code != 2 {
 		t.Fatal(code)
+	}
+}
+
+func mustWrite(t *testing.T, path string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, data, perm); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -29,20 +29,18 @@ func TestUTF16(t *testing.T) {
 	src := strings.Replace(v2, "where data lives", "数据目录 😀", 1)
 	for _, le := range []bool{true, false} {
 		p := filepath.Join(t.TempDir(), "app.jsonc")
-		os.WriteFile(p, toUTF16(src, le), 0o644)
+		mustWrite(t, p, toUTF16(src, le), 0o644)
 		o := opts()
-		r, err := cfgfile.Load[Config](p, o)
+		f, err := cfgfile.Open[Config](p, o)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Value.DataDir != "/var/lib/app" || string(r.Text) != src {
+		if r := f.Result(); r.Value.DataDir != "/var/lib/app" || string(r.Text) != src {
 			t.Fatalf("%+v", r.Value)
 		}
-		c := r.Value
+		c := f.Value()
 		c.Log.Level = "warn"
-		if _, err := cfgfile.Save(p, r.Snapshot, &c, o); err != nil {
-			t.Fatal(err)
-		}
+		must(t, f.Save(&c))
 		got, _ := os.ReadFile(p)
 		if want := toUTF16(strings.Replace(src, `"debug"`, `"warn"`, 1), le); !bytes.Equal(got, want) {
 			t.Fatalf("le=%v: saved %q", le, got)
@@ -50,7 +48,7 @@ func TestUTF16(t *testing.T) {
 	}
 	// Migration and write-back keep UTF-16 too.
 	p := filepath.Join(t.TempDir(), "app.jsonc")
-	os.WriteFile(p, toUTF16(v1, true), 0o644)
+	mustWrite(t, p, toUTF16(v1, true), 0o644)
 	o := opts()
 	o.Persist = true
 	if r, err := cfgfile.Load[Config](p, o); err != nil || !r.Persisted {
@@ -77,18 +75,18 @@ func TestBadEncodings(t *testing.T) {
 		{append(toUTF16("{", true), 0x00, 0xD8, '}', 0), "invalid UTF-16"},
 	} {
 		p := filepath.Join(t.TempDir(), "app.jsonc")
-		os.WriteFile(p, c.data, 0o644)
+		mustWrite(t, p, c.data, 0o644)
 		_, err := cfgfile.Load[Config](p, opts())
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%q: %v, want %q", c.data, err, c.want)
 		}
 	}
 	p := filepath.Join(t.TempDir(), "app.jsonc")
-	os.WriteFile(p, []byte("\xff\xff"), 0o644)
+	mustWrite(t, p, []byte("\xff\xff"), 0o644)
 	if _, err := cfgfile.Load[Config](p, opts()); err == nil {
 		t.Fatal("garbage accepted")
 	}
-	os.WriteFile(p, []byte("{\"version\": 2, // \xa1\n}"), 0o644)
+	mustWrite(t, p, []byte("{\"version\": 2, // \xa1\n}"), 0o644)
 	if _, err := cfgfile.Load[Config](p, opts()); !errors.Is(err, jwcc.ErrNotUTF8) {
 		t.Fatal(err)
 	}
@@ -100,15 +98,13 @@ func TestLineEndingsAndBOM(t *testing.T) {
 		p := write(t, in)
 		o := opts()
 		o.Persist = true
-		r, err := cfgfile.Load[Config](p, o)
-		if err != nil || !r.Persisted {
+		f, err := cfgfile.Open[Config](p, o)
+		if err != nil || !f.Result().Persisted {
 			t.Fatal(err)
 		}
-		c := r.Value
+		c := f.Value()
 		c.Log.Format = "json"
-		if _, err := cfgfile.Save(p, r.Snapshot, &c, o); err != nil {
-			t.Fatal(err)
-		}
+		must(t, f.Save(&c))
 		got, _ := os.ReadFile(p)
 		want := "\xEF\xBB\xBF" + strings.ReplaceAll(strings.NewReplacer(`"version": 1`, `"version": 2`, `"datadir"`, `"data_dir"`, `"addr"`, `"listen"`).Replace(v1), "\n", nl)
 		want = strings.Replace(want, "},"+nl+"}", "},"+nl+"  \"log\": {"+nl+"    \"format\": \"json\""+nl+"  },"+nl+"}", 1)
@@ -118,12 +114,14 @@ func TestLineEndingsAndBOM(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), "new.jsonc")
 	o := opts()
-	o.CRLF = true
-	c := Config{DataDir: "/d"}
-	c.Defaults()
-	if _, err := cfgfile.Save(p, cfgfile.Snapshot{}, &c, o); err != nil {
+	o.NewFileCRLF = true
+	f, err := cfgfile.Open[Config](p, o)
+	if err != nil {
 		t.Fatal(err)
 	}
+	c := f.Value()
+	c.DataDir = "/d"
+	must(t, f.Save(&c))
 	if got, _ := os.ReadFile(p); string(got) != "{\r\n  \"version\": 2,\r\n  \"data_dir\": \"/d\"\r\n}\r\n" {
 		t.Fatalf("%q", got)
 	}

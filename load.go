@@ -4,22 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"reflect"
 	"strconv"
 
 	"github.com/djylb/cfgfile/jwcc"
 )
 
-// Errors returned by Load, Update and Save; test with errors.Is.
+// Errors of this package; test with errors.Is.
 var (
 	ErrTooNew       = errors.New("cfgfile: file version is newer than this program supports")
 	ErrNoVersion    = errors.New("cfgfile: file has no valid version")
 	ErrNoMigration  = errors.New("cfgfile: no migration for file version")
 	ErrConflict     = errors.New("cfgfile: file changed since it was read")
+	ErrOverridden   = errors.New("cfgfile: value set by a flag or environment variable was changed")
 	ErrNotPersisted = errors.New("cfgfile: migrated configuration not written back")
 	ErrNotDurable   = errors.New("cfgfile: file replaced, but the directory sync failed")
+	ErrUnknown      = errors.New("unknown member")
+	ErrEncoding     = errors.New("cfgfile: unsupported file encoding")
+	ErrRemoved      = errors.New("cfgfile: configuration file removed")
 )
 
 // Migration rewrites a document of version N into version N+1. It edits
@@ -27,42 +33,78 @@ var (
 // has. Load sets the version member afterwards.
 type Migration func(doc *jwcc.Value) error
 
-// Options configures Load, Update and Save. Version is required.
+// Unknown selects what happens to members of the file that the type does
+// not have.
+type Unknown int
+
+const (
+	// UnknownReject makes an unknown member an error (the default).
+	UnknownReject Unknown = iota
+	// UnknownWarn ignores unknown members and reports each one in
+	// Result.Warnings, wrapped with ErrUnknown.
+	UnknownWarn
+)
+
+// Options configures Load and Open. A nil *Options is the zero value: an
+// unversioned file, no environment, no flags.
 type Options struct {
-	// Version is the file version this program reads and writes (>= 1).
+	// Version is the file version this program reads and writes. Zero
+	// means unversioned: no version member is required or written.
 	Version int
 	// VersionField is the top-level member holding the version; default
 	// "version".
 	VersionField string
 	// Migrations[N] migrates version N to N+1.
 	Migrations map[int]Migration
+	// EnvPrefix enables environment overlay ("" disables it); see Field.
+	EnvPrefix string
+	// LookupEnv reads the environment; default os.LookupEnv.
+	LookupEnv func(string) (string, bool)
+	// Flags is read after it has been parsed: every flag that was set on
+	// the command line and is named like a field (see Field and
+	// DefineFlags) overrides the environment and the file.
+	Flags *flag.FlagSet
+	// Limits bounds parsing; nil uses the jwcc defaults. Files larger than
+	// Limits.MaxSize (twice that for UTF-16) are not read.
+	Limits *jwcc.Limits
+	// Unknown selects how unknown members are handled.
+	Unknown Unknown
+	// NewFilePerm is the mode of a file this package creates; default 0600.
+	// Existing files keep their mode.
+	NewFilePerm fs.FileMode
 	// Persist makes Load write a migrated file back: the original is first
 	// copied to <path>.v<old>.bak (never overwritten), then the file is
 	// replaced atomically. If that fails Load still succeeds and reports
 	// the failure in Result.Warnings, wrapped with ErrNotPersisted.
 	Persist bool
-	// EnvPrefix enables environment overlay ("" disables it); see Field.
-	EnvPrefix string
-	// LookupEnv reads the environment; default os.LookupEnv.
-	LookupEnv func(string) (string, bool)
-	// Flags, from BindFlags, override the environment and the file.
-	Flags *Flags
-	// Limits bounds parsing; nil uses the jwcc defaults. Files larger than
-	// Limits.MaxSize (twice that for UTF-16) are not read.
-	Limits *jwcc.Options
-	// Perm is the mode of a file Update or Save creates; default 0600.
-	// Existing files keep their mode.
-	Perm fs.FileMode
-	// CRLF makes a file that Update or Save creates use CRLF line endings
+	// NewFileCRLF makes a file this package creates use CRLF line endings
 	// instead of LF. Existing files keep their own line endings.
-	CRLF bool
+	NewFileCRLF bool
 }
+
+var noOptions Options
 
 func (o *Options) field() string {
 	if o.VersionField == "" {
 		return "version"
 	}
 	return o.VersionField
+}
+
+func (o *Options) versioned() bool { return o.Version > 0 }
+
+func (o *Options) perm() fs.FileMode {
+	if o.NewFilePerm == 0 {
+		return 0o600
+	}
+	return o.NewFilePerm
+}
+
+func (o *Options) newline() string {
+	if o.NewFileCRLF {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 // Defaulter is implemented by configuration types that set defaults before
@@ -78,17 +120,19 @@ type Result[T any] struct {
 	Value T
 	// Exists reports that the file was found.
 	Exists bool
-	// FileVersion is the version found in the file (0 without a file).
+	// FileVersion is the version found in the file (0 without a file or
+	// when unversioned).
 	FileVersion int
 	// Migrated reports that migrations ran; Persisted that the result was
 	// written back.
 	Migrated, Persisted bool
-	// Text is the document after migration (nil without a file): the input
-	// of a dry run. It is UTF-8 even for a UTF-16 file.
+	// Text is the document after migration (nil without a file), for
+	// example for a dry run. It is UTF-8 even for a UTF-16 file.
 	Text []byte
-	// Snapshot identifies the file on disk, for Update and Save.
-	Snapshot Snapshot
-	// Warnings are non-fatal problems, such as ErrNotPersisted.
+	// Overrides lists the paths set by a flag or an environment variable.
+	Overrides []jwcc.Path
+	// Warnings are non-fatal problems, such as ErrNotPersisted and, with
+	// UnknownWarn, ErrUnknown.
 	Warnings []error
 }
 
@@ -122,23 +166,31 @@ type msgErr struct {
 func (e *msgErr) Error() string { return e.msg }
 func (e *msgErr) Unwrap() error { return e.err }
 
-// Load reads the configuration at path into a T, which must be a struct:
+// Load reads the configuration at path into a T, which must be a struct.
+// It is the stateless form of Open, for programs that only read:
 //
 //  1. Defaults, if *T is a Defaulter.
 //  2. The file, if path is not empty and the file exists: parse, check the
 //     version (newer than Options.Version is ErrTooNew), run migrations,
-//     then decode strictly: unknown members, null for non-pointer fields,
-//     and members that differ from a field name only in case are errors.
-//     The top-level "$schema" member and the version member are always
-//     allowed.
+//     then decode strictly: unknown members (see Options.Unknown), null for
+//     non-pointer fields, and members that differ from a field name only in
+//     case are errors. The top-level "$schema" member and, when versioned,
+//     the version member are always allowed. Relative Path fields are
+//     resolved against the file's directory.
 //  3. Environment variables, then flags (see Field).
 //  4. Validate, if *T is a Validator.
 //  5. With Options.Persist, write a migrated file back.
 //
 // Load is safe for concurrent use and starts no goroutines.
 func Load[T any](path string, o *Options) (*Result[T], error) {
+	r, _, err := load[T](path, o)
+	return r, err
+}
+
+func load[T any](path string, o *Options) (*Result[T], snapshot, error) {
+	o = orDefault(o)
 	if err := o.check(); err != nil {
-		return nil, err
+		return nil, snapshot{}, err
 	}
 	var data []byte
 	exists := false
@@ -149,52 +201,61 @@ func Load[T any](path string, o *Options) (*Result[T], error) {
 		case err == nil:
 			exists = true
 		case !errors.Is(err, fs.ErrNotExist):
-			return nil, err
+			return nil, snapshot{}, err
 		}
 	}
 	return loadData[T](path, data, exists, o)
 }
 
+func orDefault(o *Options) *Options {
+	if o == nil {
+		return &noOptions
+	}
+	return o
+}
+
 // loadData is Load on content already read from path.
-func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result[T], error) {
+func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result[T], snapshot, error) {
 	r := &Result[T]{Exists: exists}
 	v := reflect.ValueOf(&r.Value).Elem()
 	if v.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("cfgfile: %v is not a struct", v.Type())
+		return nil, snapshot{}, fmt.Errorf("cfgfile: %v is not a struct", v.Type())
 	}
 	if d, ok := any(&r.Value).(Defaulter); ok {
 		d.Defaults()
 	}
-	r.Snapshot = snapshotOf(data, r.Exists)
+	snap := snapshotOf(data, exists)
 	var enc textEncoding
-	if r.Exists {
+	if exists {
 		text, e, err := decodeText(data)
 		if err != nil {
-			return nil, &Error{File: path, Err: err}
+			return nil, snapshot{}, &Error{File: path, Err: err}
 		}
 		enc = e
 		doc, ver, err := prepare(path, text, o)
 		if err != nil {
-			return nil, err
+			return nil, snapshot{}, err
 		}
 		r.FileVersion, r.Migrated = ver, ver < o.Version
 		r.Text = doc.Pack()
-		if err := decode(path, r.Text, &r.Value, o); err != nil {
-			return nil, err
+		if err := decode(path, r.Text, &r.Value, o, &r.Warnings); err != nil {
+			return nil, snapshot{}, err
 		}
+		resolvePaths(v, filepath.Dir(path))
 	}
 	overrides, err := overlay(v, o)
 	if err != nil {
-		return nil, err
+		return nil, snapshot{}, err
 	}
-	r.Snapshot.Overrides = overrides
+	r.Overrides = overrides
 	if val, ok := any(&r.Value).(Validator); ok {
 		if err := val.Validate(); err != nil {
-			return nil, &Error{File: path, Err: err}
+			return nil, snapshot{}, &Error{File: path, Err: err}
 		}
 	}
 	if r.Migrated && o.Persist {
-		err := persist(path, data, encodeText(r.Text, enc), r.FileVersion, r.Snapshot)
+		out := encodeText(r.Text, enc)
+		err := persist(path, data, out, r.FileVersion, snap, o)
 		if errors.Is(err, ErrNotDurable) {
 			r.Warnings = append(r.Warnings, err)
 			err = nil
@@ -203,16 +264,15 @@ func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result
 			r.Warnings = append(r.Warnings, fmt.Errorf("%w: %w", ErrNotPersisted, err))
 		} else {
 			r.Persisted = true
-			r.Snapshot = snapshotOf(encodeText(r.Text, enc), true)
-			r.Snapshot.Overrides = overrides
+			snap = snapshotOf(out, true)
 		}
 	}
-	return r, nil
+	return r, snap, nil
 }
 
 func (o *Options) check() error {
-	if o == nil || o.Version < 1 {
-		return errors.New("cfgfile: Options.Version must be at least 1")
+	if o.Version < 0 {
+		return errors.New("cfgfile: Options.Version must not be negative")
 	}
 	return nil
 }
@@ -227,11 +287,14 @@ func prepare(path string, data []byte, o *Options) (*jwcc.Value, int, error) {
 		}
 		return nil, 0, &Error{File: path, Err: err}
 	}
-	vp := jwcc.Path{o.field()}
-	ver := 0
 	if doc.Obj == nil {
 		return nil, 0, &Error{File: path, Line: 1, Column: 1, Err: errors.New("top level is not an object")}
 	}
+	if !o.versioned() {
+		return doc, 0, nil
+	}
+	vp := jwcc.Path{o.field()}
+	ver := 0
 	if vv := doc.Find(vp); vv != nil {
 		n, err := strconv.Atoi(string(vv.Lit))
 		if err == nil && n >= 1 {
@@ -263,7 +326,7 @@ func prepare(path string, data []byte, o *Options) (*jwcc.Value, int, error) {
 }
 
 // decode strictly decodes the document text into dst.
-func decode(path string, text []byte, dst any, o *Options) error {
+func decode(path string, text []byte, dst any, o *Options, warnings *[]error) error {
 	doc, err := jwcc.Parse(text, o.Limits)
 	if err != nil {
 		return &Error{File: path, Err: err}
@@ -273,7 +336,7 @@ func decode(path string, text []byte, dst any, o *Options) error {
 		l, c := jwcc.Position(text, off)
 		return &Error{File: path, Line: l, Column: c, Path: p, Err: err}
 	}
-	c := checker{std: std, versionField: o.field(), at: at}
+	c := checker{std: std, versionField: o.field(), versioned: o.versioned(), at: at, unknown: o.Unknown, warnings: warnings}
 	if err := c.tree(doc, reflect.TypeOf(dst).Elem(), nil); err != nil {
 		return err
 	}
@@ -299,7 +362,11 @@ func decode(path string, text []byte, dst any, o *Options) error {
 type checker struct {
 	std          []byte
 	versionField string
+	versioned    bool
 	at           func(int, jwcc.Path, error) error
+	unknown      Unknown
+	warnings     *[]error
+	secret       bool // inside a secret member: keep values out of errors
 }
 
 // tree reports what encoding/json would accept silently or without a
@@ -311,8 +378,9 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 		switch t.Kind() {
 		case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map:
 			return nil
+		default:
+			return at(v.Start, p, fmt.Errorf("null is not allowed for %v", t))
 		}
-		return at(v.Start, p, fmt.Errorf("null is not allowed for %v", t))
 	}
 	for t.Kind() == reflect.Pointer && !opaque(t) {
 		t = t.Elem()
@@ -321,8 +389,11 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 		// Decode it alone so that its error gets a position.
 		if err := json.Unmarshal(c.std[v.Start:v.End], reflect.New(t).Interface()); err != nil {
 			var te *json.UnmarshalTypeError
-			if errors.As(err, &te) {
+			switch {
+			case errors.As(err, &te):
 				err = fmt.Errorf("cannot use %s as %v", te.Value, t)
+			case c.secret:
+				err = fmt.Errorf("invalid %v (secret value not shown)", t)
 			}
 			return at(v.Start, p, err)
 		}
@@ -333,22 +404,32 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 		if v.Obj == nil {
 			return nil // encoding/json reports the type error
 		}
-		byName := map[string]reflect.Type{}
+		byName := map[string]member{}
 		for _, m := range members(t) {
-			byName[m.name] = m.typ
+			byName[m.name] = m
 		}
 		for i := range v.Obj.Members {
 			m := &v.Obj.Members[i]
 			key := m.Key()
 			cp := append(append(jwcc.Path(nil), p...), key)
-			ft, ok := byName[key]
+			fm, ok := byName[key]
+			ft := fm.typ
 			if !ok {
-				if len(p) == 0 && (key == "$schema" || key == c.versionField) {
+				if len(p) == 0 && (key == "$schema" || c.versioned && key == c.versionField) {
 					continue
 				}
-				return at(m.Name.Start, cp, errors.New("unknown member"))
+				err := at(m.Name.Start, cp, ErrUnknown)
+				if c.unknown == UnknownWarn {
+					if c.warnings != nil {
+						*c.warnings = append(*c.warnings, err)
+					}
+					continue
+				}
+				return err
 			}
-			if err := c.tree(&m.Value, ft, cp); err != nil {
+			inner := *c
+			inner.secret = c.secret || fm.secret
+			if err := inner.tree(&m.Value, ft, cp); err != nil {
 				return err
 			}
 		}
@@ -373,6 +454,8 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 				}
 			}
 		}
+	default:
+		// Scalars and interfaces: encoding/json reports type errors.
 	}
 	return nil
 }

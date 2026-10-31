@@ -96,13 +96,13 @@ func TestErrors(t *testing.T) {
 
 func TestLimits(t *testing.T) {
 	deep := strings.Repeat("[", 10) + strings.Repeat("]", 10)
-	if _, err := Parse([]byte(deep), &Options{MaxDepth: 9}); err == nil {
+	if _, err := Parse([]byte(deep), &Limits{MaxDepth: 9}); err == nil {
 		t.Fatal("depth not bounded")
 	}
-	if _, err := Parse([]byte(deep), &Options{MaxDepth: 10}); err != nil {
+	if _, err := Parse([]byte(deep), &Limits{MaxDepth: 10}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Parse([]byte(deep), &Options{MaxSize: 19}); !errors.Is(err, ErrTooLarge) {
+	if _, err := Parse([]byte(deep), &Limits{MaxSize: 19}); !errors.Is(err, ErrTooLarge) {
 		t.Fatal(err)
 	}
 	if _, err := Parse([]byte(strings.Repeat("[", 100000)), nil); err == nil {
@@ -385,7 +385,7 @@ func TestLinearEdits(t *testing.T) {
 		b.WriteString("  \"k" + itoa(i) + "\": 1,\n")
 	}
 	b.WriteString("}\n")
-	v, err := Parse([]byte(b.String()), &Options{MaxSize: 1 << 22})
+	v, err := Parse([]byte(b.String()), &Limits{MaxSize: 1 << 22})
 	if err != nil {
 		t.Fatal(err)
 	}

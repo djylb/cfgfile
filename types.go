@@ -36,10 +36,15 @@ func sortedKeys(m map[string]any) []string {
 
 // Duration is a time.Duration written as a string such as "30s" or
 // "1h30m".
+//
+// MarshalText has a value receiver so that values and fields both encode;
+// UnmarshalText needs a pointer receiver. The same holds for Size.
 type Duration time.Duration
 
+//goland:noinspection GoMixedReceiverTypes
 func (d Duration) MarshalText() ([]byte, error) { return []byte(time.Duration(d).String()), nil }
 
+//goland:noinspection GoMixedReceiverTypes
 func (d *Duration) UnmarshalText(b []byte) error {
 	v, err := time.ParseDuration(string(b))
 	if err != nil {
@@ -63,6 +68,7 @@ var sizeUnits = []struct {
 	{"PB", 1e15}, {"TB", 1e12}, {"GB", 1e9}, {"MB", 1e6}, {"KB", 1e3}, {"B", 1},
 }
 
+//goland:noinspection GoMixedReceiverTypes
 func (s Size) MarshalText() ([]byte, error) {
 	for _, u := range sizeUnits[:5] {
 		if s != 0 && uint64(s)%u.mul == 0 {
@@ -72,6 +78,7 @@ func (s Size) MarshalText() ([]byte, error) {
 	return []byte(strconv.FormatUint(uint64(s), 10) + "B"), nil
 }
 
+//goland:noinspection GoMixedReceiverTypes
 func (s *Size) UnmarshalText(b []byte) error {
 	str := strings.TrimSpace(string(b))
 	num := strings.TrimRight(str, "KMGTPiB ")

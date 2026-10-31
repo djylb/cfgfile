@@ -1,111 +1,206 @@
 # cfgfile
 
 Versioned configuration files for Go, written in JWCC (JSON with comments
-and trailing commas), with comment-preserving rewrites. Standard library
-only.
+and trailing commas), that programs can rewrite without losing the
+user's comments. Standard library only.
 
-- `jwcc`: parser and printer that keep every byte (comments, whitespace,
-  trailing commas), positions as line, column and JSON path, `Standardize`
-  for strict JSON of equal length, and edits by path (`Set`, `Delete`,
-  `Rename`, `Move`) that leave everything else untouched. Usable on its own.
-- `cfgfile`: `Load[T]` with strict decoding, version checks, step
-  migrations on the syntax tree, optional write-back with a backup,
-  environment and flag overlay, and validation; `Update` and `Save` for
-  safe program rewrites.
-- `cmd/cfgfile-schema`: JSON Schema from struct tags for editors.
-- `cmd/cfgfile-fmt`: canonical formatting (`jwcc.Format`), with `-w`, `-l`,
-  `-d`, `-check` and `-strict` (standard JSON); `cfgfile.FormatFile` offers
-  the same to programs, for a `config fmt` subcommand.
+- `cfgfile`: `Open[T]` reads a file into a struct (strict decoding,
+  versions and migrations, environment and flag overrides, validation) and
+  saves changes back atomically, touching only what changed; `Watch`
+  reloads it on change. `Load[T]` is the read-only shortcut.
+- `jwcc`: parser and printer that keep every byte, error positions as
+  line, column and JSON path, edits by path (`Set`, `Delete`, `Rename`,
+  `Move`) and a canonical formatter. Usable on its own.
+- `cmd/cfgfile-schema`: JSON Schema from struct tags, for editors.
+- `cmd/cfgfile-fmt`: formatting with `-w`, `-l`, `-d`, `-check`, and
+  `-strict` for plain JSON; `cfgfile.Format` and `cfgfile.ToJSON` offer the
+  same to programs (for example for a `config fmt` subcommand).
 
-## Loading
+## A complete program
+
+First run, read, modify, save and watch:
 
 ```go
+// Command app shows the whole cycle: find or create the file, read it with
+// flags and environment on top, change a value, save it, and watch it.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/djylb/cfgfile"
+)
+
 type Config struct {
-	Version int    `json:"version"`
-	DataDir string `json:"data_dir" doc:"data directory"`
+	Listen  string           `json:"listen" doc:"address to listen on"`
+	DataDir cfgfile.FilePath `json:"data_dir" doc:"data directory, relative to this file"`
+	Token   string           `json:"token" secret:"true" doc:"API token (or APP_TOKEN_FILE)"`
 	Log     struct {
-		Level string `json:"level" enum:"debug,info,warn,error"`
+		Level string `json:"level" doc:"debug, info, warn or error"`
 	} `json:"log"`
-	Timeout cfgfile.Duration `json:"timeout"`
 }
 
-func (c *Config) Defaults()       { c.Log.Level = "info" }
-func (c *Config) Validate() error { return nil }
-
-opts := &cfgfile.Options{
-	Version:   2,
-	EnvPrefix: "APP_",
-	Persist:   true,
-	Migrations: map[int]cfgfile.Migration{
-		1: func(doc *jwcc.Value) error { return doc.Rename(jwcc.Path{"datadir"}, "data_dir") },
-	},
+func (c *Config) Defaults() {
+	c.Listen = "127.0.0.1:8080"
+	c.DataDir = "data"
+	c.Log.Level = "info"
 }
-opts.Flags, _ = cfgfile.BindFlags[Config](flag.CommandLine, opts)
-flag.Parse()
-res, err := cfgfile.Load[Config]("app.jsonc", opts)
+
+func (c *Config) Validate() error {
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+		return nil
+	}
+	return fmt.Errorf("log.level: unknown level %q", c.Log.Level)
+}
+
+func main() {
+	opts := &cfgfile.Options{Version: 1, EnvPrefix: "APP_", Flags: flag.CommandLine}
+	path := flag.String("config", "", "configuration file")
+	if err := cfgfile.DefineFlags[Config](flag.CommandLine, opts); err != nil {
+		log.Fatal(err)
+	}
+	flag.Parse()
+
+	// First run: find the file, or write a commented template.
+	if *path == "" {
+		p, err := cfgfile.Locate("app.jsonc", cfgfile.DefaultDirs("app")...)
+		if errors.Is(err, fs.ErrNotExist) {
+			p = "app.jsonc"
+			if err := cfgfile.CreateFile[Config](p, opts); err != nil {
+				log.Fatal(err)
+			}
+		} else if err != nil {
+			log.Fatal(err)
+		}
+		*path = p
+	}
+
+	// Read: defaults, file, environment, flags, Validate.
+	f, err := cfgfile.Open[Config](*path, opts)
+	if err != nil {
+		log.Fatal(err) // e.g. app.jsonc:4:5: log.levle: unknown member
+	}
+	for _, w := range f.Result().Warnings {
+		log.Print(w)
+	}
+	cfg := f.Value()
+	log.Printf("config: %+v", cfgfile.Redacted(&cfg))
+
+	// Modify and save: only the changed member is rewritten.
+	cfg.Listen = "127.0.0.1:9090"
+	if err := f.Save(&cfg); err != nil {
+		log.Fatal(err) // ErrConflict, ErrOverridden, validation errors
+	}
+
+	// Watch for edits; SIGHUP forces a reload.
+	w, err := f.Watch(context.Background(), cfgfile.WatchOptions[Config]{
+		OnChange: func(c cfgfile.Change[Config]) { log.Printf("changed: %v", c.Changed) },
+		OnError:  func(err error) { log.Print(err) },
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer w.Close()
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP, os.Interrupt)
+	for s := range hup {
+		if s == os.Interrupt {
+			return
+		}
+		w.Reload()
+	}
+}
 ```
 
-A missing file is not an error: the result holds defaults plus overrides.
-`Load` rejects unknown members, `null` for non-pointer fields, members that
-match a field only case-insensitively, and files whose version is newer
-than `Options.Version` (`ErrTooNew`). Errors carry file, line, column and
-path: `app.jsonc:4:5: log.levle: unknown member`.
+## Traps
+
+- **Values from flags and the environment are never written to the file.**
+  Changing one in memory and calling `Save` fails with `ErrOverridden`
+  naming the paths; use `SaveOverridden` to write them on purpose.
+- **Someone else edited the file:** `Save` and `Update` fail with
+  `ErrConflict` instead of overwriting; call `Reload` and retry. Two
+  `File`s on the same path conflict the same way; share one `File`.
+- **A versioned file needs its version member.** With `Options.Version` set
+  a file without `"version"` is rejected with a message saying what to add.
+  Leave `Version` at 0 for files that are never migrated.
+- **Defaults are not written by `Save`**, only changes; use `Template` or
+  `CreateFile` for a file with every member and its documentation.
+- **Relative paths** are relative to the working directory unless the
+  field is a `cfgfile.FilePath`, which is resolved against the file's
+  directory.
+- **No includes, no multi-file merging.** A rewrite needs one file that is
+  the single source of every value; merged files would make it ambiguous
+  which file a change belongs in.
+- `Save` inserts new members compactly (`"log": {"level": "debug"}`); run
+  `cfgfile-fmt -w` or `jwcc.Format` for a canonical layout.
+
+## Reading
+
+`Open` and `Load` apply, in order: `Defaults()`, the file, environment
+variables, flags, `Validate()`. A missing file is not an error. Decoding is
+strict: unknown members (or, with `Unknown: UnknownWarn`, a warning per
+member), `null` for non-pointer fields, case-only matches and extra
+elements of fixed-size arrays are rejected. Errors carry file, line, column
+and path: `app.jsonc:4:5: log.levle: unknown member`. Files larger than
+`Limits.MaxSize` (default 1 MiB; twice that for UTF-16) are not read.
 
 ## Versions and migrations
 
-The top-level integer `version` (name configurable) starts at 1 and is
-required; a file without it is rejected with a message naming the member
-to add.
-`Migrations[N]` turns version N into N+1 on the syntax tree; `Load` then
-sets the version. With `Persist`, a migrated file is written back: the
-original is first copied to `app.jsonc.v1.bak` (an existing backup is never
-replaced), then the file is replaced atomically. If writing fails, for
-example on a read-only file system, `Load` still returns the migrated
-configuration and reports `ErrNotPersisted` in `Result.Warnings`.
+With `Options.Version` set, the top-level integer `version` (name
+configurable) is required, a newer file is refused (`ErrTooNew`), and
+`Migrations[N]` turns version N into N+1 on the syntax tree, so it can
+handle members the struct no longer has; the version is then updated.
+With `Persist`, a migrated file is written back after copying the original
+to `app.jsonc.v1.bak` (never replaced). If that fails, for example on a
+read-only file system, the migrated value is still used and
+`ErrNotPersisted` is reported in `Result.Warnings`.
 
-## Overlay mapping
+## Flags and environment
 
-Every leaf of the struct can also come from a flag and an environment
-variable whose names are derived from its path in the file:
+Every leaf of the struct can come from a flag and an environment variable
+named after its path in the file:
 
 | file path | flag | environment (`EnvPrefix: "APP_"`) |
 |---|---|---|
-| `data_dir` | `-data_dir` | `APP_DATA_DIR` |
+| `data_dir` | `-data_dir` | `APP_DATA_DIR` or `APP_DATA_DIR_FILE` |
 | `log.level` | `-log.level` | `APP_LOG_LEVEL` |
-| `admin.bootstrap.admin_user` | `-admin.bootstrap.admin_user` | `APP_ADMIN_BOOTSTRAP_ADMIN_USER` |
+| `admin.bootstrap.user` | `-admin.bootstrap.user` | `APP_ADMIN_BOOTSTRAP_USER` |
 
-Path elements are json tag names; embedded structs are flattened; `.`
-and `-` become `_` in variable names, which are upper case. Leaves are
-non-struct fields and types that decode themselves; slices and maps are
-leaves. Strings are taken verbatim, `encoding.TextUnmarshaler` types go
-through `UnmarshalText`, and everything else is read as JSON (`APP_PORTS=[80,443]`).
-Precedence: flags, environment, file, `Defaults`. Overrides are never
-written to the file: `Result.Snapshot.Overrides` lists the overridden
-paths, and `Save` keeps the file's value there (remove a path from the list
-to write it). `Fields[T]` lists the mapping.
+Path elements are json names; embedded structs are flattened; `.` and `-`
+become `_` in variable names, which are upper case. `NAME_FILE` reads the
+value from a file (for secrets mounted as files). Leaves are non-struct
+fields and types that decode themselves; slices and maps are leaves and are
+written as JSON (`APP_PORTS=[80,443]`); strings are taken verbatim and
+`encoding.TextUnmarshaler` types use `UnmarshalText`. Precedence: flags,
+environment, file, `Defaults`.
 
-## Rewriting
+`DefineFlags[T](fs, opts)` defines the flags with the defaults as default
+values and the `doc` tag (or the type) as usage. Set `Options.Flags` to the
+`FlagSet`; after `Parse`, the flags that were given override the rest.
+Tags: `flag:"-"` and `env:"-"` exclude a field; `secret:"true"` keeps its
+value out of errors, flag defaults, templates and `Redacted`.
 
-`Result.Snapshot` records the size and SHA-256 of the file as read.
-`Update(path, snap, opts, fn)` re-reads the file, fails with `ErrConflict`
-if it changed, applies `fn` to the syntax tree, checks the result decodes
-and validates, and writes it atomically (temporary file, fsync, rename,
-directory fsync; the file mode is kept). `Save` derives the edits from a
-changed struct and touches only members whose value changed; fields are
-compared one by one, so a zero value the caller set is written even with
-`omitempty`.
+## Saving
 
-`WriteFile` replaces a symbolic link's target and keeps the link; a hard
-link is broken (the path gets a new file). If only the final directory
-sync fails, the file has been replaced: the error wraps `ErrNotDurable`
-and `Update`/`Save` still return the new snapshot. Files larger than the
-parse limit (`Limits.MaxSize`, default 1 MiB; twice that for UTF-16) are
-not read.
-
-The conflict check and the rename are not one atomic step: a writer that
-does not use this package can still slip in between and be overwritten.
-There is no file lock. The replaced file keeps its mode but not its owner;
-run the writer as the owning user.
+`File.Save(&v)` compares `v` with what the file holds field by field
+(ignoring `omitempty`, so zero values are written) and edits only the
+members that differ; everything else, comments included, stays.
+`File.Update(fn)` edits the syntax tree directly. Both validate the result
+before writing, write atomically (temporary file in the same directory,
+fsync, rename, directory fsync; the mode is kept; a symbolic link's target
+is replaced and the link kept; a hard link is broken), and then read the
+file back. If only the directory sync fails the file is written and the
+error wraps `ErrNotDurable`. The conflict check and the rename are not one
+atomic step; there is no file lock.
 
 ## Encodings and line endings
 
@@ -139,30 +234,31 @@ changes the decoded value.
 
 ## Hot reload
 
-```go
-w, err := cfgfile.Watch(ctx, "app.jsonc", opts, cfgfile.WatchOptions[Config]{
-	OnChange: func(c cfgfile.Change[Config]) { apply(c.Result.Value, c.Changed) },
-	OnError:  func(err error) { log.Print(err) },
-}, res)
-// on SIGHUP: w.Reload()
-```
+`File.Watch(ctx, opts)` polls every `Interval` (default 2s). A change of
+size, modification time or file identity (atomic rename), or a
+modification time recent enough that a coarse clock could hide a write,
+leads to a content hash, and only new content is loaded, after `Debounce`
+(default 200ms) of quiet. A reload runs the whole read pipeline; invalid
+files and removal (`ErrRemoved`) go to `OnError` and keep the previous
+value; a different valid value becomes `File.Value` and goes to `OnChange`
+with the old and new values and the top-level members that changed. Which
+members can be applied without a restart is the caller's decision. The
+`File`'s own `Save` and `Update` do not cause callbacks. `Watcher.Reload`
+forces a reload, for example on SIGHUP.
 
-The watcher polls every `Interval` (default 2s): a change of size,
-modification time or file identity (atomic rename), or a modification time
-recent enough that a coarse clock could hide a write, leads to a content
-hash, and only new content is loaded, after `Debounce` (default 200ms) of
-quiet. A reload runs the full `Load` pipeline; migrations are written back
-only with `Persist`. Invalid files and removal (`ErrRemoved`) go to
-`OnError` and the previous value stays in effect; a valid value that
-differs from the previous one goes to `OnChange` with the top-level members
-that changed. Which members can be applied without a restart is the
-caller's decision. `Watcher.Save` and `Watcher.Update` write without
-triggering a reload.
+Each watch runs exactly one goroutine, which ends when the context is done
+or `Close` is called; callbacks run on it one at a time. `Close` is
+idempotent and does not block; after it returns no new callback starts, and
+`Done` is closed once the goroutine (and a callback already running) has
+finished.
 
-Each watcher runs exactly one goroutine; callbacks run on it one at a time.
-`Close` is idempotent and does not block; after it returns no new callback
-starts, and `Done` is closed once the goroutine (and a callback that was
-already running) has finished. Cancelling the context has the same effect.
+## Finding the file
+
+`DefaultDirs("app")` lists, in order of precedence, the working directory,
+the user's configuration directory (`os.UserConfigDir`) and the system
+directory (`/etc/app`; also `/Library/Application Support/app` on macOS;
+`%ProgramData%\app` on Windows). `Locate(name, dirs...)` returns the first
+that exists. A path given explicitly (`-config`) should win over all.
 
 ## Schema
 
@@ -175,9 +271,9 @@ serves editors only; `Load` does not read it.
 
 ## Concurrency
 
-No global state; the only goroutine is one per `Watcher`. All functions
-are safe for concurrent use;
-a `*jwcc.Value` may be read concurrently but needs exclusive access to edit.
+No global state; the only goroutine is the one per watch. All functions
+and `File` methods are safe for concurrent use; writes through one `File`
+are serialised.
 
 ## License
 

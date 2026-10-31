@@ -73,7 +73,7 @@ func FuzzPatch(f *testing.F) {
 				t.Fatalf("line endings mixed: %v -> %v\n%q", in, got, out)
 			}
 		}
-		w, err := Parse(out, &Options{MaxDepth: 1 << 20, MaxSize: 1 << 30})
+		w, err := Parse(out, &Limits{MaxDepth: 1 << 20, MaxSize: 1 << 30})
 		if err != nil {
 			t.Fatalf("edits produced invalid JWCC: %v\n%q", err, out)
 		}

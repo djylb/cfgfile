@@ -14,7 +14,7 @@
 //	-trailing multiline (default), keep or remove trailing commas
 //
 // Programs embedding the package can offer the same through
-// cfgfile.FormatFile.
+// cfgfile.Format.
 package main
 
 import (
@@ -57,7 +57,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "remove":
 		o.Trailing = jwcc.TrailingRemove
 	default:
-		fmt.Fprintf(stderr, "cfgfile-fmt: bad -trailing %q\n", *trailing)
+		// The exit status reports the error even if stderr is gone.
+		_, _ = fmt.Fprintf(stderr, "cfgfile-fmt: bad -trailing %q\n", *trailing)
 		return 2
 	}
 	indent := "  "
@@ -66,13 +67,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	process := func(name string, raw []byte) (bool, error) {
 		if *strict {
-			out, err := cfgfile.StandardJSON(raw, indent)
+			out, err := cfgfile.ToJSON(raw, indent)
 			if err == nil {
 				_, err = stdout.Write(out)
 			}
 			return false, err
 		}
-		out, err := cfgfile.FormatFile(raw, o)
+		out, err := cfgfile.Format(raw, o)
 		if err != nil {
 			return false, err
 		}
@@ -86,11 +87,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 		case *list || *check:
 			if differs {
-				fmt.Fprintln(stdout, displayName(name))
+				_, err = fmt.Fprintln(stdout, displayName(name))
 			}
 		case *diff:
 			if differs {
-				fmt.Fprint(stdout, lineDiff(displayName(name), string(raw), string(out)))
+				_, err = io.WriteString(stdout, lineDiff(displayName(name), string(raw), string(out)))
 			}
 		default:
 			_, err = stdout.Write(out)
@@ -99,7 +100,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	status, anyDiff := 0, false
 	report := func(name string, err error) {
-		fmt.Fprintf(stderr, "%s: %v\n", displayName(name), err)
+		// The exit status reports the error even if stderr is gone.
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", displayName(name), err)
 		status = 1
 	}
 	if fs.NArg() == 0 {
@@ -145,7 +147,7 @@ func displayName(name string) string {
 func lineDiff(name, a, b string) string {
 	x, y := strings.SplitAfter(a, "\n"), strings.SplitAfter(b, "\n")
 	var out strings.Builder
-	fmt.Fprintf(&out, "--- %s\n+++ %s (formatted)\n", name, name)
+	out.WriteString("--- " + name + "\n+++ " + name + " (formatted)\n")
 	if len(x)*len(y) > 4<<20 {
 		out.WriteString("files differ (too long to diff)\n")
 		return out.String()

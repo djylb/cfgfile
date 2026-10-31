@@ -9,6 +9,7 @@
 //	doc:"text"         description (else the field's comment)
 //	enum:"a,b,c"       allowed values
 //	default:"value"    default (JSON text, else a string)
+//	secret:"true"      writeOnly
 //
 // Types with an UnmarshalText method, cfgfile.Duration and cfgfile.Size are
 // strings; types from other packages are unconstrained. Objects reject
@@ -37,7 +38,7 @@ func main() {
 	dir := flag.String("dir", ".", "package directory")
 	out := flag.String("o", "", "output file (default stdout)")
 	id := flag.String("id", "", "$id of the schema")
-	vf := flag.String("version-field", "version", "top-level version member (always allowed)")
+	vf := flag.String("version-field", "version", "top-level version member (always allowed; empty for unversioned files)")
 	flag.Parse()
 	if *typ == "" {
 		flag.Usage()
@@ -52,7 +53,8 @@ func main() {
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cfgfile-schema:", err)
+		// The exit status reports the error even if stderr is gone.
+		_, _ = fmt.Fprintln(os.Stderr, "cfgfile-schema:", err)
 		os.Exit(1)
 	}
 }
@@ -145,7 +147,7 @@ func generate(dir, typ, id, versionField string) ([]byte, error) {
 	root = append(root, kv{"title", typ})
 	body := g.object(st, true)
 	props := body[1].v.(obj)
-	if !slices.ContainsFunc(props, func(e kv) bool { return e.k == versionField }) {
+	if versionField != "" && !slices.ContainsFunc(props, func(e kv) bool { return e.k == versionField }) {
 		props = slices.Insert(props, 1, kv{versionField, obj{{"type", "integer"}, {"minimum", 1}}})
 		body[1].v = props
 	}
@@ -277,6 +279,9 @@ func (g *gen) add(props *obj, name string, f *ast.Field, tag reflect.StructTag) 
 			vals = append(vals, literal(v, s))
 		}
 		s = append(s, kv{"enum", vals})
+	}
+	if tag.Get("secret") == "true" {
+		s = append(s, kv{"writeOnly", true})
 	}
 	if d, ok := tag.Lookup("default"); ok {
 		s = append(s, kv{"default", literal(d, s)})

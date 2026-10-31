@@ -41,7 +41,9 @@ func TestGenerate(t *testing.T) {
 		}
 	}
 	var compact bytes.Buffer
-	json.Compact(&compact, b)
+	if err := json.Compact(&compact, b); err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		`"names":{"type":["array","null"]`,
 		`"backup":{"anyOf":[{"$ref":"#/$defs/Log"},{"type":"null"}]}`,

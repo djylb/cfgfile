@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -122,9 +121,14 @@ func TestNoFile(t *testing.T) {
 	o.LookupEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 	fs := flag.NewFlagSet("x", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fl, err := cfgfile.BindFlags[Config](fs, o)
-	if err != nil {
+	if err := cfgfile.DefineFlags[Config](fs, o); err != nil {
 		t.Fatal(err)
+	}
+	if f := fs.Lookup("timeout"); f == nil || f.DefValue != "30s" || f.Usage != "duration" {
+		t.Fatalf("%+v", f)
+	}
+	if f := fs.Lookup("admin.listen"); f.Usage != "admin listen address" {
+		t.Fatalf("%+v", f)
 	}
 	if err := fs.Parse([]string{"-log.level=error", "-limit=1KiB"}); err != nil {
 		t.Fatal(err)
@@ -132,7 +136,7 @@ func TestNoFile(t *testing.T) {
 	if fs.Parse([]string{"-limit=lots"}) == nil {
 		t.Fatal("bad flag value accepted")
 	}
-	o.Flags = fl
+	o.Flags = fs
 	r, err := cfgfile.Load[Config](filepath.Join(t.TempDir(), "none.jsonc"), o)
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +174,7 @@ func TestFields(t *testing.T) {
 			C int `json:"c"`
 		} `json:"a_b"`
 	}
-	if _, err := cfgfile.Fields[clash](nil); err == nil {
+	if _, err := cfgfile.Fields[clash](&cfgfile.Options{EnvPrefix: "X_"}); err == nil {
 		t.Fatal("clash not detected")
 	}
 }
@@ -228,7 +232,7 @@ func TestMigratePersist(t *testing.T) {
 		t.Fatal("mode not kept", st.Mode())
 	}
 	// A second migration of another v1 file keeps the first backup.
-	os.WriteFile(p, []byte(strings.Replace(v1, "/var", "/srv", 1)), 0o644)
+	mustWrite(t, p, []byte(strings.Replace(v1, "/var", "/srv", 1)), 0o644)
 	if _, err := cfgfile.Load[Config](p, o); err != nil {
 		t.Fatal(err)
 	}
@@ -243,8 +247,8 @@ func TestReadOnlyFallback(t *testing.T) {
 	}
 	p := write(t, v1)
 	dir := filepath.Dir(p)
-	os.Chmod(dir, 0o500)
-	defer os.Chmod(dir, 0o700)
+	must(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { must(t, os.Chmod(dir, 0o700)) })
 	o := opts()
 	o.Persist = true
 	r, err := cfgfile.Load[Config](p, o)
@@ -262,15 +266,14 @@ func TestReadOnlyFallback(t *testing.T) {
 func TestUpdateSave(t *testing.T) {
 	p := write(t, v2)
 	o := opts()
-	r, err := cfgfile.Load[Config](p, o)
+	f, err := cfgfile.Open[Config](p, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := r.Value
+	c := f.Value()
 	c.Log.Level = "warn"
 	c.Labels = map[string]string{"a": "b"}
-	snap, err := cfgfile.Save(p, r.Snapshot, &c, o)
-	if err != nil {
+	if err := f.Save(&c); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(p)
@@ -279,16 +282,15 @@ func TestUpdateSave(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("saved:\n%s\nwant:\n%s", got, want)
 	}
-	// The old snapshot is stale now.
-	if _, err := cfgfile.Save(p, r.Snapshot, &c, o); !errors.Is(err, cfgfile.ErrConflict) {
-		t.Fatal(err)
+	if f.Value().Log.Level != "warn" {
+		t.Fatal("value in effect not updated")
 	}
-	if _, err := cfgfile.Update[Config](p, snap, o, func(doc *jwcc.Value) error {
+	if err := f.Update(func(doc *jwcc.Value) error {
 		return doc.SetValue(jwcc.Path{"log", "level"}, "nope")
 	}); err == nil {
 		t.Fatal("invalid update written")
 	}
-	if _, err := cfgfile.Update[Config](p, snap, o, func(doc *jwcc.Value) error {
+	if err := f.Update(func(doc *jwcc.Value) error {
 		return doc.Delete(jwcc.Path{"labels"})
 	}); err != nil {
 		t.Fatal(err)
@@ -296,13 +298,32 @@ func TestUpdateSave(t *testing.T) {
 	if got, _ := os.ReadFile(p); string(got) != strings.Replace(v2, `"debug"`, `"warn"`, 1) {
 		t.Fatalf("%s", got)
 	}
-	// Creating a file.
-	np := filepath.Join(t.TempDir(), "new.jsonc")
-	c = Config{DataDir: "/d"}
-	c.Defaults()
-	if _, err := cfgfile.Save(np, cfgfile.Snapshot{}, &c, o); err != nil {
+	// Someone else edits the file: Save refuses, Reload then Save works.
+	mustWrite(t, p, []byte(strings.Replace(v2, `"debug"`, `"error"`, 1)), 0o644)
+	c = f.Value()
+	c.DataDir = "/d"
+	if err := f.Save(&c); !errors.Is(err, cfgfile.ErrConflict) {
 		t.Fatal(err)
 	}
+	must(t, f.Reload())
+	c = f.Value()
+	c.DataDir = "/d"
+	must(t, f.Save(&c))
+	if got := f.Value(); got.DataDir != "/d" || got.Log.Level != "error" {
+		t.Fatalf("%+v", got)
+	}
+	// Creating a file.
+	np := filepath.Join(t.TempDir(), "new.jsonc")
+	nf, err := cfgfile.Open[Config](np, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nf.Result().Exists {
+		t.Fatal("exists")
+	}
+	c = nf.Value()
+	c.DataDir = "/d"
+	must(t, nf.Save(&c))
 	if got, _ := os.ReadFile(np); string(got) != "{\n  \"version\": 2,\n  \"data_dir\": \"/d\"\n}\n" {
 		t.Fatalf("%q", got)
 	}
@@ -352,32 +373,27 @@ func TestSaveKeepsOverrides(t *testing.T) {
 	o.EnvPrefix = "APP_"
 	env := map[string]string{"APP_LOG_LEVEL": "error", "APP_ADMIN_BOOTSTRAP_ADMIN_USER": "root", "APP_DATA_DIR": "/tmp/x"}
 	o.LookupEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
-	r, err := cfgfile.Load[Config](p, o)
+	f, err := cfgfile.Open[Config](p, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Snapshot.Overrides) != 3 || r.Value.Log.Level != "error" {
-		t.Fatalf("%+v", r.Snapshot.Overrides)
+	if r := f.Result(); len(r.Overrides) != 3 || r.Value.Log.Level != "error" {
+		t.Fatalf("%+v", r.Overrides)
 	}
-	c := r.Value
+	c := f.Value()
 	c.Log.Format = "json"
-	c.DataDir = "/new" // overridden: kept from the file
-	snap, err := cfgfile.Save(p, r.Snapshot, &c, o)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, f.Save(&c))
 	got, _ := os.ReadFile(p)
 	if want := strings.Replace(v2, `{"level": "debug"}`, `{"level": "debug","format": "json"}`, 1); string(got) != want {
 		t.Fatalf("saved:\n%s\nwant:\n%s", got, want)
 	}
-	if len(snap.Overrides) != 3 {
-		t.Fatal("overrides not carried over")
-	}
-	// Removing a path from Overrides writes the in-memory value.
-	snap.Overrides = slices.DeleteFunc(snap.Overrides, func(p jwcc.Path) bool { return p.String() == "data_dir" })
-	if _, err := cfgfile.Save(p, snap, &c, o); err != nil {
+	// Changing an overridden value is an error unless asked for.
+	c = f.Value()
+	c.DataDir = "/new"
+	if err := f.Save(&c); !errors.Is(err, cfgfile.ErrOverridden) || !strings.Contains(err.Error(), "data_dir") {
 		t.Fatal(err)
 	}
+	must(t, f.SaveOverridden(&c))
 	if got, _ := os.ReadFile(p); !strings.Contains(string(got), `"data_dir": "/new"`) || strings.Contains(string(got), "root") || strings.Contains(string(got), "error") {
 		t.Fatalf("%s", got)
 	}
@@ -388,4 +404,16 @@ func TestNoVersionMessage(t *testing.T) {
 	if !errors.Is(err, cfgfile.ErrNoVersion) || !strings.Contains(err.Error(), `add a top-level "version" member`) || !strings.Contains(err.Error(), "version 2") {
 		t.Fatal(err)
 	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWrite(t *testing.T, path string, data []byte, perm os.FileMode) {
+	t.Helper()
+	must(t, os.WriteFile(path, data, perm))
 }

@@ -3,7 +3,6 @@ package cfgfile
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,9 +23,6 @@ const (
 	encUTF16LE
 	encUTF16BE
 )
-
-// ErrEncoding is wrapped by errors for files in an unsupported encoding.
-var ErrEncoding = errors.New("cfgfile: unsupported file encoding")
 
 // decodeText returns the UTF-8 text of a file and its encoding. Text that
 // is not valid UTF-8 is left for the parser, which reports the position.
@@ -98,10 +94,10 @@ func encodeText(text []byte, enc textEncoding) []byte {
 	return out
 }
 
-// FormatFile formats the content of a configuration file with jwcc.Format,
+// Format formats the content of a configuration file with jwcc.Format,
 // keeping its encoding (UTF-8 with or without a byte order mark, or UTF-16
 // with one) and line endings.
-func FormatFile(raw []byte, o *jwcc.FormatOptions) ([]byte, error) {
+func Format(raw []byte, o *jwcc.FormatOptions) ([]byte, error) {
 	text, enc, err := decodeText(raw)
 	if err != nil {
 		return nil, err
@@ -113,10 +109,9 @@ func FormatFile(raw []byte, o *jwcc.FormatOptions) ([]byte, error) {
 	return encodeText(jwcc.Format(v, o), enc), nil
 }
 
-// StandardJSON returns the content of a configuration file as indented
-// standard JSON in UTF-8, without comments, trailing commas or byte order
-// mark.
-func StandardJSON(raw []byte, indent string) ([]byte, error) {
+// ToJSON returns the content of a configuration file as indented standard
+// JSON in UTF-8, without comments, trailing commas or byte order mark.
+func ToJSON(raw []byte, indent string) ([]byte, error) {
 	text, _, err := decodeText(raw)
 	if err != nil {
 		return nil, err
@@ -134,7 +129,7 @@ func StandardJSON(raw []byte, indent string) ([]byte, error) {
 }
 
 // readFile reads path, refusing more than the parse limit allows.
-func readFile(path string, o *Options) ([]byte, error) {
+func readFile(path string, o *Options) (_ []byte, err error) {
 	limit := int64(jwcc.DefaultMaxSize)
 	if o != nil && o.Limits != nil && o.Limits.MaxSize > 0 {
 		limit = int64(o.Limits.MaxSize)
@@ -144,7 +139,11 @@ func readFile(path string, o *Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil && cerr != nil {
+			err = cerr
+		}
+	}()
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err

@@ -9,21 +9,21 @@ import (
 	"unicode/utf8"
 )
 
-// Default limits used when Options or one of its fields is zero.
+// Default limits used when Limits or one of its fields is zero.
 const (
 	DefaultMaxDepth = 64
 	DefaultMaxSize  = 1 << 20
 )
 
-// Options bounds parsing. A nil *Options uses the defaults.
-type Options struct {
+// Limits bounds parsing. A nil *Limits uses the defaults.
+type Limits struct {
 	// MaxDepth is the deepest nesting of objects and arrays allowed.
 	MaxDepth int
 	// MaxSize is the largest input accepted, in bytes.
 	MaxSize int
 }
 
-func (o *Options) limits() (depth, size int) {
+func (o *Limits) limits() (depth, size int) {
 	depth, size = DefaultMaxDepth, DefaultMaxSize
 	if o != nil {
 		if o.MaxDepth > 0 {
@@ -56,7 +56,7 @@ func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("%d:%d: %s", e.Line, e.Column, e.Msg)
 }
 
-// ErrTooLarge is wrapped by the error for input above Options.MaxSize.
+// ErrTooLarge is wrapped by the error for input above Limits.MaxSize.
 var ErrTooLarge = errors.New("jwcc: input too large")
 
 type parser struct {
@@ -69,7 +69,7 @@ type parser struct {
 
 // Parse parses a complete JWCC document. Duplicate names in an object are
 // an error.
-func Parse(data []byte, opts *Options) (*Value, error) {
+func Parse(data []byte, opts *Limits) (*Value, error) {
 	maxDepth, maxSize := opts.limits()
 	if len(data) > maxSize {
 		return nil, fmt.Errorf("%w: %d bytes, limit %d", ErrTooLarge, len(data), maxSize)
@@ -87,9 +87,9 @@ func Parse(data []byte, opts *Options) (*Value, error) {
 }
 
 // ParseValue parses a single value, such as the argument of Set.
-func ParseValue(data []byte) (*Value, error) { return Parse(data, &Options{MaxSize: len(data) + 1}) }
+func ParseValue(data []byte) (*Value, error) { return Parse(data, &Limits{MaxSize: len(data) + 1}) }
 
-func (p *parser) errf(format string, args ...any) error {
+func (p *parser) errf(format string, args ...any) *SyntaxError {
 	l, c := Position(p.data, p.pos)
 	msg := fmt.Sprintf(format, args...)
 	if strings.HasPrefix(format, "unexpected") && p.pos < len(p.data) {
@@ -392,7 +392,7 @@ func (p *parser) utf8() error {
 }
 
 func (p *parser) notUTF8() error {
-	err := p.errf("invalid UTF-8 byte 0x%02x: %v", p.data[p.pos], ErrNotUTF8).(*SyntaxError)
+	err := p.errf("invalid UTF-8 byte 0x%02x: %v", p.data[p.pos], ErrNotUTF8)
 	err.err = ErrNotUTF8
 	return err
 }

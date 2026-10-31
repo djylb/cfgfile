@@ -6,47 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/djylb/cfgfile/jwcc"
 )
 
-// Snapshot identifies the content of a file as it was read. The zero value
-// stands for a file that did not exist.
-type Snapshot struct {
-	Exists bool
-	Size   int64
-	Hash   [sha256.Size]byte
-	// Overrides lists the paths whose loaded value came from a flag or an
-	// environment variable. Save keeps the file's value at these paths;
-	// remove a path from the list to write the in-memory value instead.
-	// Update and Save carry it over to the snapshot they return.
-	Overrides []jwcc.Path
+// snapshot identifies the content of a file as it was read. The zero
+// value stands for a file that did not exist.
+type snapshot struct {
+	exists bool
+	size   int64
+	hash   [sha256.Size]byte
 }
 
-func (s Snapshot) same(t Snapshot) bool {
-	return s.Exists == t.Exists && s.Size == t.Size && s.Hash == t.Hash
-}
-
-func snapshotOf(data []byte, exists bool) Snapshot {
+func snapshotOf(data []byte, exists bool) snapshot {
 	if !exists {
-		return Snapshot{}
+		return snapshot{}
 	}
-	return Snapshot{Exists: true, Size: int64(len(data)), Hash: sha256.Sum256(data)}
+	return snapshot{exists: true, size: int64(len(data)), hash: sha256.Sum256(data)}
 }
 
 // readCurrent reads path and fails with ErrConflict unless it matches s.
-func readCurrent(path string, s Snapshot, o *Options) ([]byte, error) {
+func readCurrent(path string, s snapshot, o *Options) ([]byte, error) {
 	data, err := readFile(path, o)
 	exists := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	if !snapshotOf(data, exists).same(s) {
+	if snapshotOf(data, exists) != s {
 		return nil, fmt.Errorf("%w: %s", ErrConflict, path)
 	}
 	return data, nil
@@ -85,8 +78,7 @@ func WriteFile(path string, data []byte, perm fs.FileMode) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
+			err = errors.Join(err, discard(f))
 		}
 	}()
 	if _, err = f.Write(data); err != nil {
@@ -151,13 +143,28 @@ func backup(path string, orig []byte, v int) error {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(f.Name())
+		if rerr := os.Remove(f.Name()); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
 	}
 	return err
 }
 
-func persist(path string, orig, text []byte, from int, snap Snapshot) error {
-	if _, err := readCurrent(path, snap, nil); err != nil {
+// discard closes and removes a temporary file after a failure; problems
+// doing so are reported alongside the failure.
+func discard(f *os.File) error {
+	var errs []error
+	if err := f.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		errs = append(errs, err)
+	}
+	if err := os.Remove(f.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func persist(path string, orig, text []byte, from int, snap snapshot, o *Options) error {
+	if _, err := readCurrent(path, snap, o); err != nil {
 		return err
 	}
 	if err := backup(path, orig, from); err != nil {
@@ -166,123 +173,148 @@ func persist(path string, orig, text []byte, from int, snap Snapshot) error {
 	return WriteFile(path, text, 0o600)
 }
 
-// Update edits the file at path through fn and writes it back atomically.
-// The file must still match snap (from Result.Snapshot or a previous
-// Update), else ErrConflict; a file that did not exist starts as an
-// object holding only the version. An older file is migrated first (and
-// backed up as by Load). The edited document must decode into a T and pass
-// its Validate; flags and the environment are not applied. Comments and
-// formatting fn does not touch are kept.
+// update edits the file at path through fn and writes it back atomically.
+// The file must still match snap, else ErrConflict; a file that did not
+// exist starts as an empty object (holding the version, if versioned). An
+// older file is migrated first and backed up. The edited document must
+// decode into a T and pass its Validate; flags and the environment are not
+// applied.
 //
 // The check and the rename are not atomic together: a writer that bypasses
 // this package can still be overwritten in that window.
-func Update[T any](path string, snap Snapshot, o *Options, fn func(doc *jwcc.Value) error) (Snapshot, error) {
-	if err := o.check(); err != nil {
-		return Snapshot{}, err
-	}
+func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Value) error) (snapshot, error) {
 	data, err := readCurrent(path, snap, o)
 	if err != nil {
-		return Snapshot{}, err
+		return snapshot{}, err
 	}
 	src, enc, err := decodeText(data)
 	if err != nil {
-		return Snapshot{}, &Error{File: path, Err: err}
+		return snapshot{}, &Error{File: path, Err: err}
 	}
-	if !snap.Exists {
-		name, _ := marshal(o.field())
-		nl := "\n"
-		if o.CRLF {
-			nl = "\r\n"
+	if !snap.exists {
+		nl := o.newline()
+		if o.versioned() {
+			name, _ := marshal(o.field())
+			src = fmt.Appendf(nil, "{%s  %s: %d%s}%s", nl, bytes.TrimSpace(name), o.Version, nl, nl)
+		} else {
+			src = []byte("{" + nl + "}" + nl)
 		}
-		src = fmt.Appendf(nil, "{%s  %s: %d%s}%s", nl, bytes.TrimSpace(name), o.Version, nl, nl)
 	}
 	doc, ver, err := prepare(path, src, o)
 	if err != nil {
-		return Snapshot{}, err
+		return snapshot{}, err
 	}
 	if err := fn(doc); err != nil {
-		return Snapshot{}, err
+		return snapshot{}, err
 	}
 	text := doc.Pack()
 	var t T
 	if d, ok := any(&t).(Defaulter); ok {
 		d.Defaults()
 	}
-	if err := decode(path, text, &t, o); err != nil {
-		return Snapshot{}, err
+	if err := decode(path, text, &t, o, nil); err != nil {
+		return snapshot{}, err
 	}
 	if v, ok := any(&t).(Validator); ok {
 		if err := v.Validate(); err != nil {
-			return Snapshot{}, &Error{File: path, Err: err}
+			return snapshot{}, &Error{File: path, Err: err}
 		}
 	}
-	if snap.Exists && ver < o.Version {
+	if snap.exists && ver < o.Version {
 		if err := backup(path, data, ver); err != nil {
-			return Snapshot{}, err
+			return snapshot{}, err
 		}
-	}
-	perm := o.Perm
-	if perm == 0 {
-		perm = 0o600
 	}
 	out := encodeText(text, enc)
-	err = WriteFile(path, out, perm)
+	err = WriteFile(path, out, o.perm())
 	if err != nil && !errors.Is(err, ErrNotDurable) {
-		return Snapshot{}, err
+		return snapshot{}, err
 	}
-	ns := snapshotOf(out, true)
-	ns.Overrides = snap.Overrides
-	return ns, err // with ErrNotDurable the file was replaced and ns is valid
+	return snapshotOf(out, true), err // with ErrNotDurable the file was replaced
 }
 
-// Save writes v to path through Update, changing only members whose value
-// differs from what the file currently decodes to (defaults included).
-// Values are compared field by field, ignoring omitempty, so a zero value
-// the caller set is written too:
-// changed values are set, members v no longer has are deleted, and
-// everything else, comments included, is left alone. Arrays are replaced
-// whole. Paths in snap.Overrides keep the file's value, so flag and
-// environment overrides are never written unless the caller removes them
-// from that list.
-func Save[T any](path string, snap Snapshot, v *T, o *Options) (Snapshot, error) {
-	want, err := toTree(reflect.ValueOf(v).Elem())
+// saveEdits returns the edits that make the file hold v: members whose
+// value differs from what the file decodes to (defaults included) are set,
+// members v no longer has are deleted. Fields are compared one by one,
+// ignoring omitempty. At an overridden path the file keeps its value
+// unless v changed it from loaded (the value with overrides); then the
+// result is ErrOverridden unless writeOverridden.
+func saveEdits[T any](path string, o *Options, v, loaded *T, overrides []jwcc.Path, writeOverridden bool) (func(*jwcc.Value) error, error) {
+	want, err := toTree(reflect.ValueOf(v).Elem(), false)
 	if err != nil {
-		return Snapshot{}, err
+		return nil, err
 	}
-	return Update[T](path, snap, o, func(doc *jwcc.Value) error {
+	was, err := toTree(reflect.ValueOf(loaded).Elem(), false)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	var keep []jwcc.Path
+	for _, p := range overrides {
+		a, _ := valueAt(want, p)
+		b, _ := valueAt(was, p)
+		if reflect.DeepEqual(a, b) {
+			keep = append(keep, p)
+		} else {
+			changed = append(changed, p.String())
+		}
+	}
+	if len(changed) > 0 && !writeOverridden {
+		return nil, fmt.Errorf("%w: %s (use SaveOverridden to write it)", ErrOverridden, strings.Join(changed, ", "))
+	}
+	return func(doc *jwcc.Value) error {
 		var cur T
 		if d, ok := any(&cur).(Defaulter); ok {
 			d.Defaults()
 		}
-		if err := decode(path, doc.Pack(), &cur, o); err != nil {
+		if err := decode(path, doc.Pack(), &cur, o, nil); err != nil {
 			return err
 		}
-		have, err := toTree(reflect.ValueOf(&cur).Elem())
+		resolvePaths(reflect.ValueOf(&cur).Elem(), filepath.Dir(path))
+		have, err := toTree(reflect.ValueOf(&cur).Elem(), false)
 		if err != nil {
 			return err
 		}
 		hm, _ := have.(map[string]any)
 		wm, _ := want.(map[string]any)
-		delete(hm, o.field())
-		delete(wm, o.field())
+		wm = maps.Clone(wm)
+		if o.versioned() {
+			delete(hm, o.field())
+			delete(wm, o.field())
+		}
 		delete(hm, "$schema")
 		delete(wm, "$schema")
-		for _, p := range snap.Overrides {
+		for _, p := range keep {
 			keepAt(hm, wm, p)
 		}
 		return diff(doc, nil, hm, wm)
-	})
+	}, nil
+}
+
+// valueAt returns the value at p in a generic tree.
+func valueAt(tree any, p jwcc.Path) (any, bool) {
+	for _, k := range p {
+		m, ok := tree.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if tree, ok = m[k]; !ok {
+			return nil, false
+		}
+	}
+	return tree, true
 }
 
 // toTree converts v to the generic form encoding/json decodes to, with
-// every struct member present (omitempty is ignored).
-func toTree(v reflect.Value) (any, error) {
+// every struct member present (omitempty is ignored). With redact, secret
+// members that are set become "[redacted]".
+func toTree(v reflect.Value, redact bool) (any, error) {
 	t := v.Type()
 	if t.Kind() == reflect.Pointer && !opaque(t) && t.Elem().Kind() == reflect.Struct && !opaque(t.Elem()) {
 		if v.IsNil() {
 			return nil, nil
 		}
-		return toTree(v.Elem())
+		return toTree(v.Elem(), redact)
 	}
 	if t.Kind() != reflect.Struct || opaque(t) {
 		return asTree(v.Interface())
@@ -300,7 +332,15 @@ outer:
 			}
 			fv = fv.Field(j)
 		}
-		x, err := toTree(fv)
+		if redact && mem.secret {
+			if !fv.IsZero() {
+				m[mem.name] = "[redacted]"
+			} else {
+				m[mem.name] = nil
+			}
+			continue
+		}
+		x, err := toTree(fv, redact)
 		if err != nil {
 			return nil, err
 		}

@@ -111,7 +111,7 @@ func (v *Value) Standardize() []byte {
 }
 
 // Standardize parses data and returns its standardized form.
-func Standardize(data []byte, opts *Options) ([]byte, error) {
+func Standardize(data []byte, opts *Limits) ([]byte, error) {
 	v, err := Parse(data, opts)
 	if err != nil {
 		return nil, err
@@ -177,13 +177,13 @@ func writeClose(b *bytes.Buffer, trailing bool, last []byte, c byte, std bool) {
 
 // Find returns the value at p, or nil.
 func (v *Value) Find(p Path) *Value {
+	cur := v
 	for _, s := range p {
-		v = v.child(s)
-		if v == nil {
+		if cur = cur.child(s); cur == nil {
 			return nil
 		}
 	}
-	return v
+	return cur
 }
 
 func (v *Value) child(s string) *Value {
@@ -217,21 +217,22 @@ func (o *Object) index(name string) int {
 // byte offset off, as parsed (offsets are stale after edits).
 func (v *Value) Locate(off int) Path {
 	var p Path
+	cur := v
 	for {
 		var next *Value
 		var seg string
 		switch {
-		case v.Obj != nil:
-			for i := range v.Obj.Members {
-				m := &v.Obj.Members[i]
+		case cur.Obj != nil:
+			for i := range cur.Obj.Members {
+				m := &cur.Obj.Members[i]
 				if off >= m.Name.Start && off < m.Value.End {
 					next, seg = &m.Value, m.Key()
 					break
 				}
 			}
-		case v.Arr != nil:
-			for i := range v.Arr.Elems {
-				e := &v.Arr.Elems[i]
+		case cur.Arr != nil:
+			for i := range cur.Arr.Elems {
+				e := &cur.Arr.Elems[i]
 				if off >= e.Start && off < e.End {
 					next, seg = e, itoa(i)
 					break
@@ -242,7 +243,7 @@ func (v *Value) Locate(off int) Path {
 			return p
 		}
 		p = append(p, seg)
-		v = next
+		cur = next
 	}
 }
 
