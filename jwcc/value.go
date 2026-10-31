@@ -33,6 +33,7 @@ type Value struct {
 	// After) in the parsed input, or -1 once an edit has made them stale.
 	Start, End int
 	nl         string // cached Newline of a parsed document
+	unit       string // cached first indentation of the document
 }
 
 // Object is a JSON object. Edit Members through the methods of Value, or

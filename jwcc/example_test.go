@@ -20,7 +20,7 @@ func ExampleValue_Set() {
 	//   // where to listen
 	//   "listen": ":8080",
 	//   "log": {
-	//     "level": "debug"
+	//     "level": "debug",
 	//   },
 	// }
 }

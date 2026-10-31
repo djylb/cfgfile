@@ -173,7 +173,8 @@ func persist(path string, orig, text []byte, from int, snap snapshot, o *Options
 	return WriteFile(path, text, 0o600)
 }
 
-// update edits the file at path through fn and writes it back atomically.
+// update edits the file at path through fn, writes it back atomically
+// and returns the bytes written.
 // The file must still match snap, else ErrConflict; a file that did not
 // exist starts as an empty object (holding the version, if versioned). An
 // older file is migrated first and backed up. The edited document must
@@ -182,14 +183,14 @@ func persist(path string, orig, text []byte, from int, snap snapshot, o *Options
 //
 // The check and the rename are not atomic together: a writer that bypasses
 // this package can still be overwritten in that window.
-func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Value) error) (snapshot, error) {
+func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Value) error) ([]byte, error) {
 	data, err := readCurrent(path, snap, o)
 	if err != nil {
-		return snapshot{}, err
+		return nil, err
 	}
 	src, enc, err := decodeText(data)
 	if err != nil {
-		return snapshot{}, &Error{File: path, Err: err}
+		return nil, &Error{File: path, Err: err}
 	}
 	if !snap.exists {
 		nl := o.newline()
@@ -202,10 +203,10 @@ func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Val
 	}
 	doc, ver, err := prepare(path, src, o)
 	if err != nil {
-		return snapshot{}, err
+		return nil, err
 	}
 	if err := fn(doc); err != nil {
-		return snapshot{}, err
+		return nil, err
 	}
 	text := doc.Pack()
 	var t T
@@ -213,24 +214,24 @@ func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Val
 		d.Defaults()
 	}
 	if err := decode(path, text, &t, o, nil); err != nil {
-		return snapshot{}, err
+		return nil, err
 	}
 	if v, ok := any(&t).(Validator); ok {
 		if err := v.Validate(); err != nil {
-			return snapshot{}, &Error{File: path, Err: err}
+			return nil, &Error{File: path, Err: err}
 		}
 	}
 	if snap.exists && ver < o.Version {
 		if err := backup(path, data, ver); err != nil {
-			return snapshot{}, err
+			return nil, err
 		}
 	}
 	out := encodeText(text, enc)
 	err = WriteFile(path, out, o.perm())
 	if err != nil && !errors.Is(err, ErrNotDurable) {
-		return snapshot{}, err
+		return nil, err
 	}
-	return snapshotOf(out, true), err // with ErrNotDurable the file was replaced
+	return out, err // with ErrNotDurable the file was replaced
 }
 
 // saveEdits returns the edits that make the file hold v: members whose
@@ -429,9 +430,5 @@ func diff(doc *jwcc.Value, p jwcc.Path, have, want any) error {
 	if reflect.DeepEqual(have, want) {
 		return nil
 	}
-	b, err := marshal(want)
-	if err != nil {
-		return err
-	}
-	return doc.Set(p, bytes.TrimSpace(b))
+	return doc.SetValue(p, want)
 }

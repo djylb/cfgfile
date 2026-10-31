@@ -401,3 +401,23 @@ func TestLinearEdits(t *testing.T) {
 		t.Fatal("missing")
 	}
 }
+
+func TestInsertFollowsStyle(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"{\n    \"a\": 1,\n}\n", "{\n    \"a\": 1,\n    \"db\": {\n        \"host\": \"h\",\n        \"port\": 5,\n    },\n    \"m\": {\n        \"k\": [\n            {\n                \"x\": 1,\n            },\n        ],\n    },\n}\n"},
+		{"{\n\t\"a\": 1\n}\n", "{\n\t\"a\": 1,\n\t\"db\": {\n\t\t\"host\": \"h\",\n\t\t\"port\": 5\n\t},\n\t\"m\": {\n\t\t\"k\": [\n\t\t\t{\n\t\t\t\t\"x\": 1\n\t\t\t}\n\t\t]\n\t}\n}\n"},
+	} {
+		got := edit(t, c.in, func(v *Value) error {
+			if err := v.SetValue(Path{"db", "host"}, "h"); err != nil {
+				return err
+			}
+			if err := v.SetValue(Path{"db", "port"}, 5); err != nil {
+				return err
+			}
+			return v.SetValue(Path{"m"}, map[string]any{"k": []any{map[string]any{"x": 1}}})
+		})
+		if got != c.want {
+			t.Errorf("%q:\ngot  %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}

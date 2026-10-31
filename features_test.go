@@ -223,3 +223,76 @@ func TestChangeOldNew(t *testing.T) {
 		t.Fatal("no change")
 	}
 }
+
+func TestFinalReviewFixes(t *testing.T) {
+	// M1: a secret number that does not fit is reported without its digits.
+	type creds struct {
+		Pin int `json:"pin"`
+	}
+	type sec struct {
+		Pin   int   `json:"pin" secret:"true"`
+		Creds creds `json:"creds" secret:"true"`
+	}
+	for _, in := range []string{`{"pin": 123456789012345678901234}`, `{"creds": {"pin": 123456789012345678901234}}`, `{"pin": "x"}`} {
+		_, err := cfgfile.Load[sec](write(t, in), nil)
+		if err == nil || strings.Contains(err.Error(), "1234567890") || !strings.Contains(err.Error(), "secret value not shown") {
+			t.Errorf("%s: %v", in, err)
+		}
+	}
+	// M2: nothing under a secret member reaches the template.
+	b, err := cfgfile.Template[withCreds](nil)
+	if err != nil || strings.Contains(string(b), "hunter2") || !strings.Contains(string(b), `"pass": ""`) {
+		t.Fatalf("%v %s", err, b)
+	}
+	// L3: a bad secret flag value is not echoed by the flag package.
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	var out strings.Builder
+	fs.SetOutput(&out)
+	must(t, cfgfile.DefineFlags[sec](fs, nil))
+	must(t, fs.Parse([]string{"-pin=topsecret"}))
+	_, err = cfgfile.Load[sec]("", &cfgfile.Options{Flags: fs})
+	if err == nil || strings.Contains(err.Error()+out.String(), "topsecret") {
+		t.Fatal(err, out.String())
+	}
+	// L4: migrations without a version.
+	if _, err := cfgfile.Load[App]("", &cfgfile.Options{Migrations: map[int]cfgfile.Migration{1: nil}}); err == nil {
+		t.Fatal("migrations without version accepted")
+	}
+	// L5: NAME and OTHER_FILE collide.
+	type clash struct {
+		X  string `json:"x"`
+		XF string `json:"x_file"`
+	}
+	if _, err := cfgfile.Fields[clash](&cfgfile.Options{EnvPrefix: "A_"}); err == nil || !strings.Contains(err.Error(), "A_X_FILE") {
+		t.Fatal(err)
+	}
+}
+
+// M3: the value in effect after a write is what was written, even if the
+// disk changes right after; the outside change then shows as a conflict.
+func TestWriteBaseline(t *testing.T) {
+	p := write(t, "{\"name\": \"a\"}")
+	f, err := cfgfile.Open[App](p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.Value()
+	c.Name = "b"
+	must(t, f.Save(&c))
+	mustWrite(t, p, []byte("{\"name\": \"outside\"}"), 0o600)
+	if f.Value().Name != "b" {
+		t.Fatal(f.Value().Name)
+	}
+	c.Name = "c"
+	if err := f.Save(&c); !errors.Is(err, cfgfile.ErrConflict) {
+		t.Fatal(err)
+	}
+}
+
+type withCreds struct {
+	Creds struct {
+		Pass string `json:"pass"`
+	} `json:"creds" secret:"true"`
+}
+
+func (w *withCreds) Defaults() { w.Creds.Pass = "hunter2" }

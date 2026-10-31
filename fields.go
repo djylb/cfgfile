@@ -182,10 +182,12 @@ func fieldsOf(t reflect.Type, o *Options) ([]Field, error) {
 		if f.Env == "" {
 			continue
 		}
-		if prev, ok := seen[f.Env]; ok {
-			return nil, fmt.Errorf("cfgfile: %s and %s both map to %s", prev, f.Path, f.Env)
+		for _, name := range []string{f.Env, f.Env + "_FILE"} {
+			if prev, ok := seen[name]; ok {
+				return nil, fmt.Errorf("cfgfile: %s and %s both use the environment variable %s", prev, f.Path, name)
+			}
+			seen[name] = f.Path.String()
 		}
-		seen[f.Env] = f.Path.String()
 	}
 	return out, nil
 }
@@ -302,6 +304,7 @@ type leafFlag struct {
 	typ    reflect.Type
 	text   string
 	isBool bool
+	secret bool // checked by Load, whose error hides the value
 }
 
 func (l *leafFlag) String() string {
@@ -312,6 +315,12 @@ func (l *leafFlag) String() string {
 }
 
 func (l *leafFlag) Set(s string) error {
+	// The flag package prints a rejected value; a secret one is checked by
+	// Load instead, which keeps it out of the error.
+	if l.secret {
+		l.text = s
+		return nil
+	}
 	if err := parseLeaf(reflect.New(l.typ).Elem(), s); err != nil {
 		return err
 	}
@@ -345,7 +354,7 @@ func DefineFlags[T any](fs *flag.FlagSet, o *Options) error {
 		if usage == "" {
 			usage = typeName(f.Type)
 		}
-		l := &leafFlag{typ: f.Type, isBool: elem(f.Type).Kind() == reflect.Bool}
+		l := &leafFlag{typ: f.Type, isBool: elem(f.Type).Kind() == reflect.Bool, secret: f.Secret}
 		if v, ok := f.peek(root); ok && !f.Secret {
 			l.text = formatLeaf(v)
 		}

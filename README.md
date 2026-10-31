@@ -140,8 +140,10 @@ func main() {
 - **No includes, no multi-file merging.** A rewrite needs one file that is
   the single source of every value; merged files would make it ambiguous
   which file a change belongs in.
-- `Save` inserts new members compactly (`"log": {"level": "debug"}`); run
-  `cfgfile-fmt -w` or `jwcc.Format` for a canonical layout.
+- `Save` writes new members in the file's style: the indentation unit of
+  the surrounding members (else the file's first indentation, else two
+  spaces) and the trailing-comma style of the enclosing object; objects go
+  one member per line, arrays of plain values stay on one line.
 
 ## Reading
 
@@ -187,7 +189,9 @@ environment, file, `Defaults`.
 values and the `doc` tag (or the type) as usage. Set `Options.Flags` to the
 `FlagSet`; after `Parse`, the flags that were given override the rest.
 Tags: `flag:"-"` and `env:"-"` exclude a field; `secret:"true"` keeps its
-value out of errors, flag defaults, templates and `Redacted`.
+value out of errors, flag defaults, templates and `Redacted` (a rejected
+secret flag value is reported by `Load` without the value, not by the flag
+package).
 
 ## Saving
 

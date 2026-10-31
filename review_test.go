@@ -131,13 +131,25 @@ func TestWriteReloadError(t *testing.T) {
 	bad.Store(true)
 	c := f.Value()
 	c.DataDir = "/x"
-	if err := f.Save(&c); err == nil || !strings.Contains(err.Error(), "reloading it failed") {
+	if err := f.Save(&c); err == nil || !strings.Contains(err.Error(), "does not load") {
 		t.Fatal(err)
 	}
+	if f.Value().DataDir == "/x" {
+		t.Fatal("unloadable value put in effect")
+	}
+	c.DataDir = "/y"
+	if err := f.Save(&c); !errors.Is(err, cfgfile.ErrConflict) {
+		t.Fatal("stale state not reported:", err)
+	}
 	bad.Store(false)
+	must(t, f.Reload())
+	if f.Value().DataDir != "/x" {
+		t.Fatal(f.Value().DataDir)
+	}
+	c = f.Value()
 	c.DataDir = "/y"
 	if err := f.Save(&c); err != nil {
-		t.Fatal("snapshot left stale:", err)
+		t.Fatal(err)
 	}
 	if got := f.Value().DataDir; got != "/y" {
 		t.Fatal(got)

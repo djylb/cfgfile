@@ -278,7 +278,7 @@ func TestUpdateSave(t *testing.T) {
 	}
 	got, _ := os.ReadFile(p)
 	want := strings.Replace(v2, `{"level": "debug"}`, `{"level": "warn"}`, 1)
-	want = strings.Replace(want, "  \"limit\": \"64MiB\",\n", "  \"limit\": \"64MiB\",\n  \"labels\": {\"a\":\"b\"},\n", 1)
+	want = strings.Replace(want, "  \"limit\": \"64MiB\",\n", "  \"limit\": \"64MiB\",\n  \"labels\": {\n    \"a\": \"b\",\n  },\n", 1)
 	if string(got) != want {
 		t.Fatalf("saved:\n%s\nwant:\n%s", got, want)
 	}

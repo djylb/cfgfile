@@ -107,7 +107,7 @@ func TestLineEndingsAndBOM(t *testing.T) {
 		must(t, f.Save(&c))
 		got, _ := os.ReadFile(p)
 		want := "\xEF\xBB\xBF" + strings.ReplaceAll(strings.NewReplacer(`"version": 1`, `"version": 2`, `"datadir"`, `"data_dir"`, `"addr"`, `"listen"`).Replace(v1), "\n", nl)
-		want = strings.Replace(want, "},"+nl+"}", "},"+nl+"  \"log\": {"+nl+"    \"format\": \"json\""+nl+"  },"+nl+"}", 1)
+		want = strings.Replace(want, "},"+nl+"}", "},"+nl+"  \"log\": {"+nl+"    \"format\": \"json\","+nl+"  },"+nl+"}", 1)
 		if string(got) != want {
 			t.Fatalf("%q:\ngot  %q\nwant %q", nl, got, want)
 		}

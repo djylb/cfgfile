@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -28,7 +29,11 @@ func (v *Value) Set(p Path, raw []byte) error {
 	return v.setNode(p, nv)
 }
 
-// SetValue is Set with x encoded by encoding/json (without HTML escaping).
+// SetValue is Set with x encoded by encoding/json (without HTML escaping)
+// and laid out in the document's style: objects, and arrays holding
+// objects or arrays, are written one member per line with the document's
+// indentation unit and the trailing-comma style of the enclosing object;
+// arrays of plain values stay on one line.
 func (v *Value) SetValue(p Path, x any) error {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
@@ -36,12 +41,129 @@ func (v *Value) SetValue(p Path, x any) error {
 	if err := enc.Encode(x); err != nil {
 		return err
 	}
-	return v.Set(p, bytes.TrimSpace(b.Bytes()))
+	if err := v.Set(p, bytes.TrimSpace(b.Bytes())); err != nil {
+		return err
+	}
+	return v.reformat(p)
+}
+
+// reformat lays out the container at p in the document's style.
+func (v *Value) reformat(p Path) error {
+	if len(p) == 0 {
+		return nil
+	}
+	parent := v.Find(p[:len(p)-1])
+	node := v.Find(p)
+	if parent == nil || node == nil || node.Lit != nil {
+		return nil
+	}
+	var before []byte
+	trailing := false
+	if parent.Obj != nil {
+		i := parent.Obj.index(p[len(p)-1])
+		before, trailing = parent.Obj.Members[i].Name.Before, parent.Obj.Trailing
+	} else {
+		i, _ := arrayIndex(p[len(p)-1])
+		before, trailing = parent.Arr.Elems[i].Before, parent.Arr.Trailing
+	}
+	ind := lineIndent(before)
+	k := lastBreak(ind)
+	if k < 0 {
+		return nil // a single-line context: keep the value compact
+	}
+	ind = ind[k+breakLen(ind, k):]
+	tp := TrailingRemove
+	if trailing {
+		tp = TrailingMultiline
+	}
+	nl := v.Newline()
+	out := Format(&Value{Lit: node.Lit, Obj: node.Obj, Arr: node.Arr}, &FormatOptions{Indent: v.indentUnit(p), Trailing: tp, Newline: nl})
+	out = bytes.TrimSuffix(out, []byte(nl))
+	out = bytes.ReplaceAll(out, []byte(nl), append([]byte(nl), ind...))
+	nv, err := ParseValue(out)
+	if err != nil {
+		return err
+	}
+	node.Lit, node.Obj, node.Arr = nv.Lit, nv.Obj, nv.Arr
+	return nil
+}
+
+// memberIndent returns the indentation of the first member or element of
+// a multi-line container, or false.
+func memberIndent(c *Value) (string, bool) {
+	var b []byte
+	switch {
+	case c.Obj != nil && len(c.Obj.Members) > 0:
+		b = c.Obj.Members[0].Name.Before
+	case c.Arr != nil && len(c.Arr.Elems) > 0:
+		b = c.Arr.Elems[0].Before
+	default:
+		return "", false
+	}
+	ind := lineIndent(b)
+	k := lastBreak(ind)
+	if k < 0 {
+		return "", false
+	}
+	return string(ind[k+breakLen(ind, k):]), true
+}
+
+// indentUnit infers one level of indentation for edits along p: the
+// difference between the deepest pair of nested containers on the path
+// whose indentation is known, else the first indentation in the document,
+// else two spaces.
+func (v *Value) indentUnit(p Path) string {
+	unit := ""
+	prev, havePrev := memberIndent(v)
+	cur := v
+	for _, seg := range p {
+		if cur = cur.child(seg); cur == nil {
+			break
+		}
+		ind, ok := memberIndent(cur)
+		if ok && havePrev && len(ind) > len(prev) && strings.HasPrefix(ind, prev) {
+			unit = ind[len(prev):]
+		}
+		prev, havePrev = ind, ok
+	}
+	if unit == "" && havePrev {
+		if first, ok := memberIndent(v); ok && first != "" {
+			unit = first
+		}
+	}
+	if unit == "" {
+		unit = v.docIndent()
+	}
+	return unit
+}
+
+// docIndent returns the first indentation in the document, or two spaces.
+func (v *Value) docIndent() string {
+	if v.unit == "" {
+		v.unit = "  "
+		data := v.Pack()
+		for i := 0; i < len(data); i++ {
+			if data[i] != '\n' && data[i] != '\r' {
+				continue
+			}
+			j := i + 1
+			for j < len(data) && (data[j] == ' ' || data[j] == '\t') {
+				j++
+			}
+			if j > i+1 && j < len(data) && data[j] != '\n' && data[j] != '\r' {
+				v.unit = string(data[i+1 : j])
+				break
+			}
+		}
+	}
+	return v.unit
 }
 
 func (v *Value) setNode(p Path, nv *Value) error {
 	nl := []byte(v.Newline())
+	unit := []byte(v.indentUnit(p))
 	cur := v
+	created, inherit := false, false
 	for i, seg := range p {
 		last := i == len(p)-1
 		switch {
@@ -59,7 +181,15 @@ func (v *Value) setNode(p Path, nv *Value) error {
 			} else {
 				child.Obj = &Object{}
 			}
-			m := cur.Obj.insert(seg, child, nl)
+			m := cur.Obj.insert(seg, child, nl, unit)
+			if created && inherit {
+				// A new object follows its parent's trailing-comma style.
+				lm := &cur.Obj.Members[len(cur.Obj.Members)-1]
+				cur.Obj.Last, lm.Value.After = append(lm.Value.After, cur.Obj.Last...), nil
+				cur.Obj.Trailing = true
+				m = lm
+			}
+			created, inherit = !last, cur.Obj.Trailing
 			if !last {
 				if ind := lineIndent(m.Name.Before); lastBreak(ind) >= 0 {
 					m.Value.Obj.Last = ind
@@ -75,7 +205,7 @@ func (v *Value) setNode(p Path, nv *Value) error {
 				return fmt.Errorf("%w: %s", ErrNotFound, p[:i+1])
 			}
 			if n == len(cur.Arr.Elems) {
-				cur.Arr.appendElem(Value{Lit: nv.Lit, Obj: nv.Obj, Arr: nv.Arr, Start: -1, End: -1}, nl)
+				cur.Arr.appendElem(Value{Lit: nv.Lit, Obj: nv.Obj, Arr: nv.Arr, Start: -1, End: -1}, nl, unit)
 				return nil
 			}
 			cur = &cur.Arr.Elems[n]
@@ -168,14 +298,15 @@ func (v *Value) setNewline(nl []byte) {
 // placeNew computes Before for a new last item and moves the closing
 // whitespace onto it. prevBefore is the previous item's Before (nil if
 // none), prevAfter the previous item's After, last the container's Last.
-func placeNew(prevBefore []byte, prevAfter, last *[]byte, trailing bool, nl []byte) (before, after []byte) {
+func placeNew(prevBefore []byte, prevAfter, last *[]byte, trailing bool, nl, unit []byte) (before, after []byte) {
 	if prevAfter == nil { // empty container
 		head, tail := wsTail(*last)
 		old := *last
 		*last = nil
 		if k := lastBreak(tail); k >= 0 {
 			before = append(slices.Clone(head), nl...)
-			before = append(before, string(tail[k+breakLen(tail, k):])+"  "...)
+			before = append(before, tail[k+breakLen(tail, k):]...)
+			before = append(before, unit...)
 			return before, slices.Clone(tail)
 		}
 		return slices.Clone(old), nil
@@ -204,13 +335,13 @@ func placeNew(prevBefore []byte, prevAfter, last *[]byte, trailing bool, nl []by
 	return before, slices.Clone(tail)
 }
 
-func (o *Object) insert(key string, val Value, nl []byte) *Member {
+func (o *Object) insert(key string, val Value, nl, unit []byte) *Member {
 	m := Member{Name: Value{Lit: quote(key), Start: -1, End: -1}, Value: val, key: key, keyed: true}
 	m.Value.Before = []byte(" ")
 	if n := len(o.Members); n > 0 {
-		m.Name.Before, m.Value.After = placeNew(o.Members[n-1].Name.Before, &o.Members[n-1].Value.After, &o.Last, o.Trailing, nl)
+		m.Name.Before, m.Value.After = placeNew(o.Members[n-1].Name.Before, &o.Members[n-1].Value.After, &o.Last, o.Trailing, nl, unit)
 	} else {
-		m.Name.Before, m.Value.After = placeNew(nil, nil, &o.Last, false, nl)
+		m.Name.Before, m.Value.After = placeNew(nil, nil, &o.Last, false, nl, unit)
 	}
 	o.Members = append(o.Members, m)
 	if o.idx != nil && len(o.idx) == len(o.Members)-1 {
@@ -219,12 +350,12 @@ func (o *Object) insert(key string, val Value, nl []byte) *Member {
 	return &o.Members[len(o.Members)-1]
 }
 
-func (a *Array) appendElem(val Value, nl []byte) {
+func (a *Array) appendElem(val Value, nl, unit []byte) {
 	if n := len(a.Elems); n > 0 {
-		before, after := placeNew(a.Elems[n-1].Before, &a.Elems[n-1].After, &a.Last, a.Trailing, nl)
+		before, after := placeNew(a.Elems[n-1].Before, &a.Elems[n-1].After, &a.Last, a.Trailing, nl, unit)
 		val.Before, val.After = before, after
 	} else {
-		val.Before, val.After = placeNew(nil, nil, &a.Last, false, nl)
+		val.Before, val.After = placeNew(nil, nil, &a.Last, false, nl, unit)
 	}
 	a.Elems = append(a.Elems, val)
 }

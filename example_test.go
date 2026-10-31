@@ -66,7 +66,7 @@ func ExampleOpen() {
 	//   // reachable from the LAN
 	//   "listen": "0.0.0.0:8080",
 	//   "log": {
-	//     "level": "debug"
+	//     "level": "debug",
 	//   },
 	// }
 }

@@ -116,7 +116,7 @@ func Redacted[T any](v *T) any {
 }
 
 // Template returns a configuration file for T holding every member with
-// its default (from Defaults; secret fields are left empty), the doc tag
+// its default (from Defaults; fields under a secret member are left zero), the doc tag
 // of each member as a comment above it and, when versioned, the version.
 func Template[T any](o *Options) ([]byte, error) {
 	o = orDefault(o)
@@ -134,7 +134,7 @@ func Template[T any](o *Options) ([]byte, error) {
 		name, _ := marshal(o.field())
 		fmt.Fprintf(&b, "%s: %d,\n", bytes.TrimSpace(name), o.Version)
 	}
-	if err := template(&b, rv, o, true, 0); err != nil {
+	if err := template(&b, rv, o, true, false, 0); err != nil {
 		return nil, err
 	}
 	b.WriteString("}\n")
@@ -145,7 +145,7 @@ func Template[T any](o *Options) ([]byte, error) {
 	return jwcc.Format(doc, &jwcc.FormatOptions{Newline: o.newline()}), nil
 }
 
-func template(b *bytes.Buffer, v reflect.Value, o *Options, top bool, depth int) error {
+func template(b *bytes.Buffer, v reflect.Value, o *Options, top, secret bool, depth int) error {
 	for _, m := range members(v.Type()) {
 		if top && o.versioned() && m.name == o.field() {
 			continue
@@ -159,6 +159,7 @@ func template(b *bytes.Buffer, v reflect.Value, o *Options, top bool, depth int)
 		b.Write(bytes.TrimSpace(name))
 		b.WriteString(": ")
 		fv, ok := fieldOf(v, m.index)
+		sec := secret || m.secret
 		ft := m.typ
 		for ft.Kind() == reflect.Pointer && !opaque(ft) {
 			ft = ft.Elem()
@@ -167,7 +168,7 @@ func template(b *bytes.Buffer, v reflect.Value, o *Options, top bool, depth int)
 		case ft.Kind() == reflect.Struct && !opaque(ft) && depth < 32:
 			b.WriteString("{\n")
 			inner := reflect.New(ft).Elem()
-			if ok {
+			if ok && !sec {
 				for fv.Kind() == reflect.Pointer && !fv.IsNil() {
 					fv = fv.Elem()
 				}
@@ -175,11 +176,11 @@ func template(b *bytes.Buffer, v reflect.Value, o *Options, top bool, depth int)
 					inner = fv
 				}
 			}
-			if err := template(b, inner, o, false, depth+1); err != nil {
+			if err := template(b, inner, o, false, sec, depth+1); err != nil {
 				return err
 			}
 			b.WriteString("}")
-		case m.secret || !ok:
+		case sec || !ok:
 			out, err := json.Marshal(reflect.Zero(m.typ).Interface())
 			if err != nil {
 				return err

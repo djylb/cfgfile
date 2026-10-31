@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/djylb/cfgfile/jwcc"
 )
@@ -271,10 +272,43 @@ func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result
 }
 
 func (o *Options) check() error {
-	if o.Version < 0 {
+	switch {
+	case o.Version < 0:
 		return errors.New("cfgfile: Options.Version must not be negative")
+	case o.Version == 0 && len(o.Migrations) > 0:
+		return errors.New("cfgfile: Options.Migrations needs Options.Version")
 	}
 	return nil
+}
+
+// secretAt reports whether p lies under a secret member of t.
+func secretAt(t reflect.Type, p jwcc.Path) bool {
+	for _, seg := range p {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		switch t.Kind() {
+		case reflect.Struct:
+			found := false
+			for _, m := range members(t) {
+				if m.name == seg {
+					if m.secret {
+						return true
+					}
+					t, found = m.typ, true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		case reflect.Slice, reflect.Array, reflect.Map:
+			t = t.Elem()
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // prepare parses data, checks its version and runs migrations.
@@ -351,6 +385,10 @@ func decode(path string, text []byte, dst any, o *Options, warnings *[]error) er
 			if n := doc.Find(p); n != nil {
 				off = n.Start
 			}
+			if secretAt(reflect.TypeOf(dst).Elem(), p) {
+				kind, _, _ := strings.Cut(te.Value, " ")
+				return at(off, p, fmt.Errorf("cannot use %s as %v (secret value not shown)", kind, te.Type))
+			}
 			return at(off, p, fmt.Errorf("cannot use %s as %v", te.Value, te.Type))
 		}
 		return &Error{File: path, Err: err}
@@ -390,10 +428,10 @@ func (c *checker) tree(v *jwcc.Value, t reflect.Type, p jwcc.Path) error {
 		if err := json.Unmarshal(c.std[v.Start:v.End], reflect.New(t).Interface()); err != nil {
 			var te *json.UnmarshalTypeError
 			switch {
-			case errors.As(err, &te):
-				err = fmt.Errorf("cannot use %s as %v", te.Value, t)
 			case c.secret:
 				err = fmt.Errorf("invalid %v (secret value not shown)", t)
+			case errors.As(err, &te):
+				err = fmt.Errorf("cannot use %s as %v", te.Value, t)
 			}
 			return at(v.Start, p, err)
 		}

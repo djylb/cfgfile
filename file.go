@@ -88,12 +88,9 @@ func (f *File[T]) Save(v *T) error { return f.save(v, false) }
 func (f *File[T]) SaveOverridden(v *T) error { return f.save(v, true) }
 
 func (f *File[T]) save(v *T, writeOverridden bool) error {
-	cur := f.Result()
-	edits, err := saveEdits(f.path, f.o, v, &cur.Value, cur.Overrides, writeOverridden)
-	if err != nil {
-		return err
-	}
-	return f.Update(edits)
+	return f.write(func(cur *Result[T]) (func(*jwcc.Value) error, error) {
+		return saveEdits(f.path, f.o, v, &cur.Value, cur.Overrides, writeOverridden)
+	})
 }
 
 // Update edits the file's syntax tree through fn and writes it back
@@ -101,31 +98,40 @@ func (f *File[T]) save(v *T, writeOverridden bool) error {
 // result must decode into a T and pass its Validate. A missing file starts
 // as an empty object; an older file is migrated first and backed up. Errors
 // are as for Save.
+//
+// If the file was written but the result does not load with the flags and
+// environment applied (for example an override no longer validates), the
+// error says so, the previous value stays in effect, and the next Save or
+// Update fails with ErrConflict until Reload succeeds; a running Watch
+// reports the error through OnError.
 func (f *File[T]) Update(fn func(doc *jwcc.Value) error) error {
+	return f.write(func(*Result[T]) (func(*jwcc.Value) error, error) { return fn, nil })
+}
+
+// write runs one write under the op lock: prep sees the value in effect at
+// that moment, and the value in effect afterwards is loaded from the
+// bytes written, never from the disk again.
+func (f *File[T]) write(prep func(cur *Result[T]) (func(*jwcc.Value) error, error)) error {
 	f.op.Lock()
 	defer f.op.Unlock()
 	f.mu.Lock()
-	snap := f.snap
+	cur, snap := f.cur, f.snap
 	f.mu.Unlock()
-	nsnap, werr := update[T](f.path, snap, f.o, fn)
+	fn, err := prep(cur)
+	if err != nil {
+		return err
+	}
+	out, werr := update[T](f.path, snap, f.o, fn)
 	if werr != nil && !errors.Is(werr, ErrNotDurable) {
 		return werr
 	}
-	data, err := readFile(f.path, f.o)
-	var r *Result[T]
-	var rsnap snapshot
-	if err == nil {
-		r, rsnap, err = loadData[T](f.path, data, true, f.o)
+	r, rsnap, err := loadData[T](f.path, out, true, f.o)
+	if err != nil {
+		return fmt.Errorf("cfgfile: file written, but it does not load: %w", err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = false
-	if err != nil {
-		// Written, but the result does not load with the overlay: keep the
-		// value, but make the next write start from what is on disk.
-		f.snap = nsnap
-		return fmt.Errorf("cfgfile: file written, but reloading it failed: %w", err)
-	}
 	f.cur, f.snap = r, rsnap
 	return werr
 }
