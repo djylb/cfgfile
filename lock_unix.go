@@ -8,8 +8,6 @@ import (
 	"syscall"
 )
 
-const lockSupported = true
-
 func lockFile(f *os.File) error {
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX)

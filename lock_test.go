@@ -1,6 +1,7 @@
 package cfgfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,10 +9,14 @@ import (
 )
 
 func TestLockWrites(t *testing.T) {
-	if !lockSupported {
-		t.Skip("no advisory locks on this platform")
-	}
 	p := filepath.Join(t.TempDir(), "c.jsonc")
+	if probe, err := os.Create(p + ".probe"); err == nil {
+		err = lockFile(probe)
+		_ = probe.Close()
+		if errors.Is(err, errLockUnsupported) {
+			t.Skip("no advisory locks on this platform")
+		}
+	}
 	o := &Options{LockWrites: true}
 	unlock, err := lockWrites(p, o)
 	if err != nil {

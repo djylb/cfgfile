@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 )
 
+// errLockUnsupported is returned by lockFile where the platform has no
+// advisory locks.
+var errLockUnsupported = errors.New("cfgfile: advisory locks are not supported on this platform")
+
 // lockPath is the advisory lock file for path: next to the file it guards
 // (the target of a symbolic link), never removed, since removing it would
 // let two writers lock different files.
@@ -23,7 +27,7 @@ func lockPath(path string) string {
 // locks, or the lock file cannot be created because the directory is not
 // writable (the write itself then fails), it does nothing.
 func lockWrites(path string, o *Options) (func(), error) {
-	if !o.LockWrites || !lockSupported {
+	if !o.LockWrites {
 		return func() {}, nil
 	}
 	f, err := os.OpenFile(lockPath(path), os.O_RDWR|os.O_CREATE, o.perm())
@@ -35,6 +39,9 @@ func lockWrites(path string, o *Options) (func(), error) {
 	}
 	if err := lockFile(f); err != nil {
 		_ = f.Close() // the lock error is what matters
+		if errors.Is(err, errLockUnsupported) {
+			return func() {}, nil
+		}
 		return nil, err
 	}
 	return func() {

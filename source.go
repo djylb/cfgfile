@@ -11,13 +11,13 @@ import (
 type SourceKind int
 
 const (
-	// FromDefault: neither the file, the environment nor a flag set it.
+	// FromDefault means neither the file, the environment nor a flag set it.
 	FromDefault SourceKind = iota
-	// FromFile: the file holds it, at Source.File:Line:Column.
+	// FromFile means the file holds it, at Source.File:Line:Column.
 	FromFile
-	// FromEnv: the environment variable Source.Name (possibly NAME_FILE).
+	// FromEnv means it came from the environment variable Source.Name (possibly NAME_FILE).
 	FromEnv
-	// FromFlag: the flag -Source.Name.
+	// FromFlag means it came from the flag -Source.Name.
 	FromFlag
 )
 
