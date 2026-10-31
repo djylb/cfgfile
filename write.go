@@ -164,6 +164,11 @@ func discard(f *os.File) error {
 }
 
 func persist(path string, orig, text []byte, from int, snap snapshot, o *Options) error {
+	unlock, err := lockWrites(path, o)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, err := readCurrent(path, snap, o); err != nil {
 		return err
 	}
@@ -184,6 +189,11 @@ func persist(path string, orig, text []byte, from int, snap snapshot, o *Options
 // The check and the rename are not atomic together: a writer that bypasses
 // this package can still be overwritten in that window.
 func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Value) error) ([]byte, error) {
+	unlock, err := lockWrites(path, o)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	data, err := readCurrent(path, snap, o)
 	if err != nil {
 		return nil, err
@@ -214,6 +224,15 @@ func update[T any](path string, snap snapshot, o *Options, fn func(doc *jwcc.Val
 		d.Defaults()
 	}
 	if err := decode(path, text, &t, o, nil); err != nil {
+		return nil, err
+	}
+	tags := sources{file: path, text: text}
+	if tags.doc, err = jwcc.Parse(text, o.Limits); err != nil {
+		return nil, &Error{File: path, Err: err}
+	}
+	// Required members may come from flags or the environment, which
+	// writing does not apply; enum values are checked here.
+	if err := checkTags(reflect.ValueOf(&t).Elem(), &tags, false); err != nil {
 		return nil, err
 	}
 	if v, ok := any(&t).(Validator); ok {

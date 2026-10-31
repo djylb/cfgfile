@@ -170,3 +170,31 @@ func ExampleTemplate() {
 	//   },
 	// }
 }
+
+// Source tells where each value came from, for diagnostics such as a
+// "config show" command.
+func ExampleFile_Source() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Println(err)
+		}
+	}()
+	path := filepath.Join(dir, "app.jsonc")
+	_ = os.WriteFile(path, []byte("{\n  \"listen\": \":80\"\n}\n"), 0o600)
+
+	env := map[string]string{"APP_LOG_LEVEL": "debug"}
+	f, err := cfgfile.Open[ExampleConfig](path, &cfgfile.Options{
+		EnvPrefix: "APP_",
+		LookupEnv: func(k string) (string, bool) { v, ok := env[k]; return v, ok },
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(filepath.Base(f.Source(jwcc.Path{"listen"}).File), f.Source(jwcc.Path{"listen"}).Line)
+	fmt.Println(f.Source(jwcc.Path{"log", "level"}))
+	// Output:
+	// app.jsonc 2
+	// environment variable APP_LOG_LEVEL
+}

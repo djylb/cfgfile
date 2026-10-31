@@ -49,6 +49,7 @@ func TestGenerate(t *testing.T) {
 		`"backup":{"anyOf":[{"$ref":"#/$defs/Log"},{"type":"null"}]}`,
 		`"pair":{"type":"array","items":{"type":"integer"},"maxItems":2}`,
 		`"rev":{"type":"integer"}`,
+		`"required":["data_dir"]`,
 	} {
 		if !strings.Contains(compact.String(), want) {
 			t.Errorf("missing %s in\n%s", want, compact.String())

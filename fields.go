@@ -32,6 +32,8 @@ type member struct {
 	doc           string
 	secret        bool
 	noFlag, noEnv bool
+	required      bool
+	enum          []string
 }
 
 // members lists the JSON members of struct type t as encoding/json sees
@@ -82,7 +84,8 @@ func members(t reflect.Type) []member {
 					name = sf.Name
 				}
 				found = append(found, member{name: name, index: idx, typ: sf.Type, doc: sf.Tag.Get("doc"),
-					secret: sf.Tag.Get("secret") == "true", noFlag: sf.Tag.Get("flag") == "-", noEnv: sf.Tag.Get("env") == "-"})
+					secret: sf.Tag.Get("secret") == "true", noFlag: sf.Tag.Get("flag") == "-", noEnv: sf.Tag.Get("env") == "-",
+					required: sf.Tag.Get("required") == "true", enum: enumTag(sf.Tag.Get("enum"))})
 				tagged = append(tagged, tagName != "")
 			}
 		}
@@ -110,13 +113,23 @@ func members(t reflect.Type) []member {
 	return out
 }
 
+func enumTag(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
 // Field is a leaf of a configuration type: a value that the file, a flag
 // and an environment variable can each set.
 //
 // Struct tags control it beside json: doc:"text" documents it (flag usage,
 // generated files, schema); flag:"-" and env:"-" keep it from flags or
 // the environment; secret:"true" keeps its value out of errors, flag
-// defaults, generated files and Redacted.
+// defaults, generated files and Redacted; required:"true" makes Load fail
+// (ErrRequired) unless the file, a flag or the environment sets it;
+// enum:"a,b,c" limits it to the listed values (ErrEnum). The schema tool
+// emits required and enum too.
 type Field struct {
 	// Path is the path of the value in the file, such as log.level.
 	Path jwcc.Path
@@ -385,7 +398,7 @@ func typeName(t reflect.Type) string {
 
 // overlay applies the environment, then flags, to v and returns the paths
 // it set.
-func overlay(v reflect.Value, o *Options) ([]jwcc.Path, error) {
+func overlay(v reflect.Value, o *Options) ([]override, error) {
 	if o.Flags == nil && o.EnvPrefix == "" {
 		return nil, nil
 	}
@@ -400,24 +413,26 @@ func overlay(v reflect.Value, o *Options) ([]jwcc.Path, error) {
 	if err != nil {
 		return nil, err
 	}
-	var set []jwcc.Path
+	var set []override
 	lookup := o.LookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
 	for _, f := range fields {
-		var s, src string
+		var s string
 		var ok bool
+		var src Source
 		if f.Flag != "" {
 			s, ok = flags[f.Flag]
-			src = "flag -" + f.Flag
+			src = Source{Kind: FromFlag, Name: f.Flag}
 		}
 		if !ok && f.Env != "" {
-			s, ok, err = envValue(lookup, f.Env)
+			var name string
+			s, name, ok, err = envValue(lookup, f.Env)
 			if err != nil {
 				return nil, err
 			}
-			src = "environment variable " + f.Env
+			src = Source{Kind: FromEnv, Name: name}
 		}
 		if !ok {
 			continue
@@ -428,24 +443,25 @@ func overlay(v reflect.Value, o *Options) ([]jwcc.Path, error) {
 			}
 			return nil, fmt.Errorf("cfgfile: %s: %w", src, err)
 		}
-		set = append(set, f.Path)
+		set = append(set, override{f.Path, src})
 	}
 	return set, nil
 }
 
-// envValue reads name, or the file named by name_FILE.
-func envValue(lookup func(string) (string, bool), name string) (string, bool, error) {
+// envValue reads name, or the file named by name_FILE, and returns the
+// variable used.
+func envValue(lookup func(string) (string, bool), name string) (string, string, bool, error) {
 	s, ok := lookup(name)
 	file, fok := lookup(name + "_FILE")
 	switch {
 	case ok && fok:
-		return "", false, fmt.Errorf("cfgfile: both %s and %s_FILE are set", name, name)
+		return "", "", false, fmt.Errorf("cfgfile: both %s and %s_FILE are set", name, name)
 	case !fok:
-		return s, ok, nil
+		return s, name, ok, nil
 	}
 	b, err := readFile(file, nil)
 	if err != nil {
-		return "", false, fmt.Errorf("cfgfile: %s_FILE: %w", name, err)
+		return "", "", false, fmt.Errorf("cfgfile: %s_FILE: %w", name, err)
 	}
-	return strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r"), true, nil
+	return strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r"), name + "_FILE", true, nil
 }

@@ -193,6 +193,19 @@ value out of errors, flag defaults, templates and `Redacted` (a rejected
 secret flag value is reported by `Load` without the value, not by the flag
 package).
 
+## Validation tags and sources
+
+Beside `Validate()`, two tags are checked on load and emitted in the
+schema, so that editors and the program agree: `required:"true"` (the
+file, a flag or the environment must set the member; `ErrRequired`) and
+`enum:"a,b,c"` (`ErrEnum`, also checked before `Save` writes). Errors carry
+the position in the file or the flag or variable that set the value; a
+secret value is never shown.
+
+`File.Source(path)` (and `Result.Source`) tells where a value came from:
+`app.jsonc:4:5`, `environment variable APP_TOKEN_FILE`, `flag -log.level`
+or `default`. It never includes the value.
+
 ## Saving
 
 `File.Save(&v)` compares `v` with what the file holds field by field
@@ -204,7 +217,11 @@ fsync, rename, directory fsync; the mode is kept; a symbolic link's target
 is replaced and the link kept; a hard link is broken), and then read the
 file back. If only the directory sync fails the file is written and the
 error wraps `ErrNotDurable`. The conflict check and the rename are not one
-atomic step; there is no file lock.
+atomic step; to close that window between cooperating processes, set
+`LockWrites`: every write then holds an advisory lock on `<file>.lock`
+(flock on Linux, macOS and the BSDs, `LockFileEx` on Windows, nothing
+elsewhere or when the directory is read-only). Readers never take it, and
+the lock file is left in place.
 
 ## Encodings and line endings
 
@@ -216,6 +233,10 @@ atomic step; there is no file lock.
 - Anything else, such as legacy 8-bit encodings, is rejected at the first
   invalid byte: `app.jsonc:2:6: invalid UTF-8 byte 0xd6: the file is not
   UTF-8; save it as UTF-8`. Bytes are never replaced silently.
+- The dialect is JWCC: comments and trailing commas, nothing else.
+  Duplicate member names are rejected, a line comment may end at the end
+  of the input, and a lone CR ends a line comment as it ends a line in
+  editors.
 - LF, CRLF and a lone CR all end a line. Edits write new line breaks in the
   file's dominant style, so a file never ends up mixed. Files created by
   `Update`/`Save` use LF, or CRLF with `Options.CRLF`.

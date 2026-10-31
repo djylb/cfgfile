@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/djylb/cfgfile"
+	"github.com/djylb/cfgfile/jwcc"
 )
 
 type App struct {
@@ -302,3 +303,73 @@ type withCreds struct {
 }
 
 func (w *withCreds) Defaults() { w.Creds.Pass = "hunter2" }
+
+type tagged struct {
+	Name  string `json:"name" required:"true"`
+	Mode  string `json:"mode" enum:"fast,safe"`
+	Level int    `json:"level" enum:"1,2,3"`
+	Key   string `json:"key" secret:"true" enum:"a,b"`
+	Sub   struct {
+		Host string `json:"host" required:"true"`
+	} `json:"sub" required:"true"`
+}
+
+func TestRequiredEnum(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"{\"sub\": {\"host\": \"h\"}}", ": name: required member missing"},
+		{"{\"name\": \"n\",\n \"sub\": {}}", ":2:9: sub.host: required member missing"},
+		{"{\"name\": \"n\", \"sub\": {\"host\": \"h\"},\n \"mode\": \"slow\"}", `:2:10: mode: value not allowed: "slow" is not one of fast, safe`},
+		{"{\"name\": \"n\", \"sub\": {\"host\": \"h\"}, \"level\": 4}", "level: value not allowed"},
+		{"{\"name\": \"n\", \"sub\": {\"host\": \"h\"}, \"key\": \"zzz\"}", "secret, not shown"},
+	} {
+		_, err := cfgfile.Load[tagged](write(t, c.in), nil)
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "zzz") {
+			t.Errorf("%s: %v, want %q", c.in, err, c.want)
+		}
+	}
+	if _, err := cfgfile.Load[tagged](write(t, "{\"name\": \"n\", \"sub\": {\"host\": \"h\"}, \"mode\": \"safe\", \"level\": 2}"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// The environment can satisfy required members, and is named in errors.
+	o := &cfgfile.Options{EnvPrefix: "T_", LookupEnv: envOf(map[string]string{"T_NAME": "n", "T_SUB_HOST": "h", "T_MODE": "x"})}
+	if _, err := cfgfile.Load[tagged]("", o); err == nil || !strings.Contains(err.Error(), "environment variable T_MODE: mode: value not allowed") {
+		t.Fatal(err)
+	}
+	// Save refuses to write a value outside the enum.
+	p := write(t, "{\"name\": \"n\", \"sub\": {\"host\": \"h\"}}")
+	f, err := cfgfile.Open[tagged](p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := f.Value()
+	v.Mode = "slow"
+	if err := f.Save(&v); !errors.Is(err, cfgfile.ErrEnum) {
+		t.Fatal(err)
+	}
+}
+
+func TestSource(t *testing.T) {
+	p := write(t, "{\n  \"name\": \"x\",\n  \"db\": {\"port\": 1}\n}")
+	pw := filepath.Join(t.TempDir(), "pw")
+	mustWrite(t, pw, []byte("s"), 0o600)
+	flags := flag.NewFlagSet("x", flag.ContinueOnError)
+	must(t, cfgfile.DefineFlags[App](flags, nil))
+	must(t, flags.Parse([]string{"-db.host=h"}))
+	f, err := cfgfile.Open[App](p, &cfgfile.Options{Flags: flags, EnvPrefix: "A_", LookupEnv: envOf(map[string]string{"A_PASSWORD_FILE": pw})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"name":     p + ":2:11",
+		"db.port":  p + ":3:18",
+		"db":       p + ":3:9",
+		"db.host":  "flag -db.host",
+		"password": "environment variable A_PASSWORD_FILE",
+		"timeout":  "default",
+	} {
+		jp, _ := jwcc.ParsePath(path)
+		if got := f.Source(jp).String(); got != want {
+			t.Errorf("%s: %s, want %s", path, got, want)
+		}
+	}
+}

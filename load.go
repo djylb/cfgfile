@@ -27,6 +27,8 @@ var (
 	ErrUnknown      = errors.New("unknown member")
 	ErrEncoding     = errors.New("cfgfile: unsupported file encoding")
 	ErrRemoved      = errors.New("cfgfile: configuration file removed")
+	ErrRequired     = errors.New("required member missing")
+	ErrEnum         = errors.New("value not allowed")
 )
 
 // Migration rewrites a document of version N into version N+1. It edits
@@ -81,6 +83,13 @@ type Options struct {
 	// NewFileCRLF makes a file this package creates use CRLF line endings
 	// instead of LF. Existing files keep their own line endings.
 	NewFileCRLF bool
+	// LockWrites makes every write (Save, Update, Persist) hold an
+	// advisory lock on <path>.lock from the conflict check to the rename,
+	// so that cooperating processes cannot interleave writes. Readers never
+	// take it. It uses flock on Linux, macOS and the BSDs and LockFileEx on
+	// Windows, and does nothing elsewhere or when the directory is not
+	// writable. The lock file is left in place.
+	LockWrites bool
 }
 
 var noOptions Options
@@ -135,6 +144,8 @@ type Result[T any] struct {
 	// Warnings are non-fatal problems, such as ErrNotPersisted and, with
 	// UnknownWarn, ErrUnknown.
 	Warnings []error
+
+	src sources
 }
 
 // Error locates a problem in a configuration file.
@@ -239,6 +250,10 @@ func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result
 		}
 		r.FileVersion, r.Migrated = ver, ver < o.Version
 		r.Text = doc.Pack()
+		r.src.file, r.src.text = path, r.Text
+		if r.src.doc, err = jwcc.Parse(r.Text, o.Limits); err != nil {
+			return nil, snapshot{}, &Error{File: path, Err: err}
+		}
 		if err := decode(path, r.Text, &r.Value, o, &r.Warnings); err != nil {
 			return nil, snapshot{}, err
 		}
@@ -248,7 +263,11 @@ func loadData[T any](path string, data []byte, exists bool, o *Options) (*Result
 	if err != nil {
 		return nil, snapshot{}, err
 	}
-	r.Overrides = overrides
+	r.src.overrides = overrides
+	r.Overrides = r.src.paths()
+	if err := checkTags(v, &r.src, true); err != nil {
+		return nil, snapshot{}, err
+	}
 	if val, ok := any(&r.Value).(Validator); ok {
 		if err := val.Validate(); err != nil {
 			return nil, snapshot{}, &Error{File: path, Err: err}

@@ -190,7 +190,7 @@ func TestStrictErrors(t *testing.T) {
 		{"{\"version\": 3}", "newer"},
 		{"{\"version\": \"2\"}", "no valid version"},
 		{"[]", "not an object"},
-		{"{\"version\": 2, \"log\": {\"level\": \"x\"}}", "bad log level"},
+		{"{\"version\": 2, \"log\": {\"level\": \"x\"}}", "1:33: log.level: value not allowed"},
 	} {
 		_, err := cfgfile.Load[Config](write(t, c.in), opts())
 		if err == nil || !strings.Contains(err.Error(), c.want) {

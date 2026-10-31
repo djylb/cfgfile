@@ -28,7 +28,7 @@ type Log struct {
 type Config struct {
 	Common
 	Version int              `json:"version"`
-	DataDir string           `json:"data_dir" doc:"data directory"`
+	DataDir string           `json:"data_dir" doc:"data directory" required:"true"`
 	Log     Log              `json:"log"`
 	Backup  *Log             `json:"backup,omitempty"`
 	Timeout cfgfile.Duration `json:"timeout"`

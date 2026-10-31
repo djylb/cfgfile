@@ -10,6 +10,7 @@
 //	enum:"a,b,c"       allowed values
 //	default:"value"    default (JSON text, else a string)
 //	secret:"true"      writeOnly
+//	required:"true"    listed in the object's required members
 //
 // Types with an UnmarshalText method, cfgfile.Duration and cfgfile.Size are
 // strings; types from other packages are unconstrained. Objects reject
@@ -93,6 +94,7 @@ type gen struct {
 	defs     obj
 	defined  map[string]bool
 	visiting map[string]bool
+	req      []string // required members of the object being built
 }
 
 func generate(dir, typ, id, versionField string) ([]byte, error) {
@@ -172,8 +174,15 @@ func (g *gen) object(st *ast.StructType, top bool) obj {
 	if top {
 		props = append(props, kv{"$schema", obj{{"type", "string"}}})
 	}
+	outer := g.req
+	g.req = nil
 	g.fields(st, &props)
-	return obj{{"type", "object"}, {"properties", props}, {"additionalProperties", false}}
+	o := obj{{"type", "object"}, {"properties", props}}
+	if len(g.req) > 0 {
+		o = append(o, kv{"required", g.req})
+	}
+	g.req = outer
+	return append(o, kv{"additionalProperties", false})
 }
 
 // fields adds the members of st: its own fields first, then those of
@@ -292,6 +301,9 @@ func (g *gen) add(props *obj, name string, f *ast.Field, tag reflect.StructTag) 
 		}
 	}
 	*props = append(*props, kv{name, s})
+	if tag.Get("required") == "true" {
+		g.req = append(g.req, name)
+	}
 }
 
 // literal reads a tag value as JSON unless the schema is a string.
