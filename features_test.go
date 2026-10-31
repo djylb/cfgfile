@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,11 @@ func TestFilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := f.Value()
-	if c.DataDir != cfgfile.FilePath(filepath.Join(dir, "data")) || c.Dirs[0] != "/abs" || c.Dirs[1] != cfgfile.FilePath(filepath.Join(dir, "rel")) {
+	abs := cfgfile.FilePath("/abs")
+	if runtime.GOOS == "windows" { // rooted: the root of the file's volume
+		abs = cfgfile.FilePath(filepath.VolumeName(dir) + "/abs")
+	}
+	if c.DataDir != cfgfile.FilePath(filepath.Join(dir, "data")) || c.Dirs[0] != abs || c.Dirs[1] != cfgfile.FilePath(filepath.Join(dir, "rel")) {
 		t.Fatalf("%+v", c)
 	}
 	// Saving an unchanged resolved path does not rewrite it.

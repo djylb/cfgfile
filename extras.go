@@ -25,6 +25,20 @@ type FilePath string
 
 var filePathType = reflect.TypeFor[FilePath]()
 
+// absPath resolves s against dir. An absolute s is kept. On Windows a
+// rooted path without a volume (\x or /x) refers to the root of dir's
+// volume, and a volume-relative path (C:x) is kept as written, since it
+// depends on that volume's working directory.
+func absPath(dir, s string) string {
+	switch {
+	case filepath.IsAbs(s), filepath.VolumeName(s) != "":
+		return s
+	case os.IsPathSeparator(s[0]):
+		return filepath.VolumeName(dir) + s
+	}
+	return filepath.Join(dir, s)
+}
+
 // resolvePaths makes the relative FilePath values in v absolute against
 // dir.
 func resolvePaths(v reflect.Value, dir string) { resolve(v, dir, 0) }
@@ -36,8 +50,8 @@ func resolve(v reflect.Value, dir string, depth int) {
 	switch v.Kind() {
 	case reflect.String:
 		if v.Type() == filePathType && v.CanSet() {
-			if s := v.String(); s != "" && !filepath.IsAbs(s) {
-				v.SetString(filepath.Join(dir, s))
+			if s := v.String(); s != "" {
+				v.SetString(absPath(dir, s))
 			}
 		}
 	case reflect.Pointer:
@@ -57,8 +71,8 @@ func resolve(v reflect.Value, dir string, depth int) {
 	case reflect.Map:
 		if v.Type().Elem() == filePathType {
 			for _, k := range v.MapKeys() {
-				if s := v.MapIndex(k).String(); s != "" && !filepath.IsAbs(s) {
-					v.SetMapIndex(k, reflect.ValueOf(FilePath(filepath.Join(dir, s))))
+				if s := v.MapIndex(k).String(); s != "" {
+					v.SetMapIndex(k, reflect.ValueOf(FilePath(absPath(dir, s))))
 				}
 			}
 		}

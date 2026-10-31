@@ -54,23 +54,29 @@ jobs:
             freebsd/386 freebsd/amd64 freebsd/arm64 \
             openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
             solaris/amd64 illumos/amd64 aix/ppc64 \
-            android/arm64 ios/arm64 \
+            android/arm64 \
             js/wasm wasip1/wasm plan9/amd64
           do
             export GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0
             echo "::group::$target"
-            if [ "$GOOS" = ios ]; then
-              # ios binaries need cgo to link, so only vet it (vet needs no C compiler).
-              CGO_ENABLED=1 go vet ./... || failed+=("$target")
-            else
-              { go vet ./... && go test -c -o /dev/null ./...; } || failed+=("$target")
-            fi
+            { go vet ./... && go test -c -o /dev/null ./...; } || failed+=("$target")
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then
             echo "::error::failed targets: ${failed[*]}"
             exit 1
           fi
+
+  ios-vet:
+    # ios needs cgo, and runtime/cgo's arm64 assembly needs an Apple toolchain.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: CGO_ENABLED=1 GOOS=ios GOARCH=arm64 go vet ./...
 
   js-wasm-test:
     runs-on: ubuntu-latest
