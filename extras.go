@@ -167,7 +167,7 @@ func template(b *bytes.Buffer, v reflect.Value, o *Options, top, secret bool, de
 			continue
 		}
 		if m.doc != "" {
-			for _, line := range strings.Split(m.doc, "\n") {
+			for line := range strings.SplitSeq(m.doc, "\n") {
 				b.WriteString("// " + line + "\n")
 			}
 		}

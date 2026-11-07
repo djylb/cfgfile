@@ -284,7 +284,7 @@ func (g *gen) add(props *obj, name string, f *ast.Field, tag reflect.StructTag) 
 	}
 	if e := tag.Get("enum"); e != "" {
 		var vals []any
-		for _, v := range strings.Split(e, ",") {
+		for v := range strings.SplitSeq(e, ",") {
 			vals = append(vals, literal(v, s))
 		}
 		s = append(s, kv{"enum", vals})

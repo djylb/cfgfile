@@ -334,8 +334,7 @@ func secretAt(t reflect.Type, p jwcc.Path) bool {
 func prepare(path string, data []byte, o *Options) (*jwcc.Value, int, error) {
 	doc, err := jwcc.Parse(data, o.Limits)
 	if err != nil {
-		var se *jwcc.SyntaxError
-		if errors.As(err, &se) {
+		if se, ok := errors.AsType[*jwcc.SyntaxError](err); ok {
 			return nil, 0, &Error{File: path, Line: se.Line, Column: se.Column, Path: se.Path, Err: &msgErr{se.Msg, errors.Unwrap(se)}}
 		}
 		return nil, 0, &Error{File: path, Err: err}
@@ -397,8 +396,7 @@ func decode(path string, text []byte, dst any, o *Options, warnings *[]error) er
 	// allows "$schema" and the version member that T may not have.
 	dec := json.NewDecoder(bytes.NewReader(std))
 	if err := dec.Decode(dst); err != nil {
-		var te *json.UnmarshalTypeError
-		if errors.As(err, &te) {
+		if te, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 			off := int(te.Offset) - 1
 			p := doc.Locate(off)
 			if n := doc.Find(p); n != nil {

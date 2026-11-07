@@ -142,7 +142,7 @@ func (v *Value) docIndent() string {
 	if v.unit == "" {
 		v.unit = "  "
 		data := v.Pack()
-		for i := 0; i < len(data); i++ {
+		for i := range data {
 			if data[i] != '\n' && data[i] != '\r' {
 				continue
 			}
